@@ -1272,8 +1272,12 @@ class App:
                 sha, fmt = self._file_info(p, stt)
                 size = stt.st_size
                 ex = DB.find_source_file(self.cx, sha)
-                state = ("Allaqachon kiritilgan (%s)" % (ex["imported_at"] or "")[:10]) \
-                    if ex else "Yangi"
+                if ex is None:
+                    state = "Yangi"
+                elif F.needs_reparse(self.cx, ex):
+                    state = "Yangi (qayta o'qiladi)"
+                else:
+                    state = "Allaqachon kiritilgan (%s)" % (ex["imported_at"] or "")[:10]
             except OSError:
                 size, fmt, state = 0, "?", "Fayl ochilmadi"
             rows.append((os.path.basename(p), kind, fmt,
@@ -1284,7 +1288,7 @@ class App:
                    (("err",) if r[4].startswith("Fayl") else ())
 
         self.tbl_files.fill(rows, tag)
-        n_new = sum(1 for r in rows if r[4] == "Yangi")
+        n_new = sum(1 for r in rows if r[4].startswith("Yangi"))
         self.lbl_queue.configure(
             text="%d ta fayl, shundan %d ta yangi" % (len(rows), n_new))
         self.btn_import.configure(state="normal" if n_new else "disabled")
@@ -1524,7 +1528,16 @@ class App:
                     warns.append("%s: %s" % (os.path.basename(path), e))
                     continue
                 if not isnew:
-                    dup_files += 1
+                    sf = cx.execute("SELECT * FROM source_file WHERE id=?",
+                                    (sid,)).fetchone()
+                    if F.needs_reparse(cx, sf):
+                        # eski versiya to'liq o'qimagan chek fayli
+                        a, n, w = F.reparse_file(cx, eng, sf, path)
+                        warns.extend(w)
+                        docs += a
+                        lines += n
+                    else:
+                        dup_files += 1
                     continue
                 r = P.parse_any(path, kind)
                 warns.extend(r["warnings"])
@@ -1533,6 +1546,9 @@ class App:
                 docs += a
                 skipped += s
                 lines += n
+            old = F.reparse_old_checks(cx, eng, progress)
+            docs += old["docs"]
+            lines += old["lines"]
             progress(len(files), len(files), "moslashtirish")
             eng.reload()
             auto, left = M.auto_match_all(cx, eng, progress=progress)
@@ -1546,8 +1562,10 @@ class App:
 
     def do_recalc(self):
         def job(cx, progress):
-            progress(0, 0, "moslashtirish")
             eng = M.MatchEngine(cx)
+            F.reparse_old_checks(cx, eng, progress)
+            eng.reload()
+            progress(0, 0, "moslashtirish")
             auto, left = M.auto_match_all(cx, eng, progress=progress)
             progress(0, 0, "ombor (FIFO)")
             st = F.rebuild_stock(cx, progress)

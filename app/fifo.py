@@ -15,6 +15,7 @@ Eski hisobotdagi ikkita asosiy nuqson shu modulda hal qilinadi:
      ko'rsatiladi - jimgina manfiyga tushmaydi.
 """
 
+import os
 import datetime
 from decimal import Decimal
 
@@ -28,10 +29,13 @@ ZERO = Decimal("0")
 # ===========================================================================
 # Import
 # ===========================================================================
-def import_parsed(cx, engine, parsed, source_file_id, on_issue=None):
+def import_parsed(cx, engine, parsed, source_file_id, on_issue=None, quiet_dups=False):
     """
     Parserdan kelgan hujjatlarni bazaga yozadi.
     (yangi_hujjat, otkazib_yuborilgan, satr) qaytaradi.
+
+    quiet_dups=True - allaqachon bor hujjat uchun "takror" yozuvi qo'shilmaydi
+    (eski faylni qayta o'qishda minglab keraksiz yozuv chiqmasligi uchun).
     """
     added = skipped = nlines = 0
 
@@ -40,7 +44,8 @@ def import_parsed(cx, engine, parsed, source_file_id, on_issue=None):
     # sekinlik - shuning uchun hammasi bitta tranzaksiyaga o'raladi.
     cx.execute("BEGIN")
     try:
-        added, skipped, nlines = _import_docs(cx, engine, parsed, source_file_id)
+        added, skipped, nlines = _import_docs(cx, engine, parsed, source_file_id,
+                                              quiet_dups)
         cx.execute("COMMIT")
     except Exception:
         cx.execute("ROLLBACK")
@@ -48,7 +53,80 @@ def import_parsed(cx, engine, parsed, source_file_id, on_issue=None):
     return added, skipped, nlines
 
 
-def _import_docs(cx, engine, parsed, source_file_id):
+# ---------------------------------------------------------------------------
+# Eski chek fayllarini qayta o'qish
+#
+# 1.3.0 gacha chek fayli (checks-info) to'liq o'qilmasdi: faqat birinchi
+# varaq, u ham faylning <dimension> yozuvigacha - amalda ko'pincha 1-2 oy.
+# Fayl sha256 bo'yicha "kiritilgan" deb belgilangani uchun uni qayta
+# tashlash ham yordam bermasdi. Shu sababli har eski chek fayli BIR MARTA
+# qayta o'qiladi. Mavjud cheklar doc_key bo'yicha o'tkazib yuboriladi,
+# faqat yetishmagan oylar qo'shiladi - ikki marta hisoblanmaydi.
+# ---------------------------------------------------------------------------
+def _reparse_key():
+    return "checks_reparsed_v%d" % C.CHECKS_PARSER_VER
+
+
+def _reparsed(cx):
+    return set(DB.get_setting(cx, _reparse_key(), []) or [])
+
+
+def needs_reparse(cx, sf):
+    """Bu source_file yozuvi eski parser bilan o'qilganmi?"""
+    return sf is not None and sf["kind"] == "chiqim" and \
+        sf["sha256"] not in _reparsed(cx)
+
+
+def _mark_reparsed(cx, shas):
+    done = _reparsed(cx)
+    done.update(shas)
+    DB.set_setting(cx, _reparse_key(), sorted(done))
+
+
+def reparse_file(cx, engine, sf, path):
+    """Bitta eski chek faylini qayta o'qiydi. (yangi_hujjat, satr, ogohlantirishlar)."""
+    import bh_parsers as P
+
+    r = P.parse_any(path, sf["kind"])
+    a, _s, n = import_parsed(cx, engine, r, sf["id"], quiet_dups=True)
+    cx.execute("UPDATE source_file SET doc_count=doc_count+?, line_count=line_count+?, "
+               "full_path=? WHERE id=?", (a, n, path, sf["id"]))
+    _mark_reparsed(cx, [sf["sha256"]])
+    return a, n, r["warnings"]
+
+
+def reparse_old_checks(cx, engine, progress=None):
+    """
+    Bazadagi barcha eski chek fayllarini (asl joyida turgan bo'lsa) qayta
+    o'qiydi. {"files", "docs", "lines", "missing": [fayl nomi]} qaytaradi.
+    """
+    done = _reparsed(cx)
+    todo = [sf for sf in cx.execute(
+        "SELECT * FROM source_file WHERE kind='chiqim' ORDER BY id").fetchall()
+        if sf["sha256"] not in done]
+    res = {"files": 0, "docs": 0, "lines": 0, "missing": []}
+    for i, sf in enumerate(todo):
+        path = sf["full_path"] or ""
+        ok = False
+        try:
+            ok = os.path.isfile(path) and DB.file_sha256(path) == sf["sha256"]
+        except OSError:
+            ok = False
+        if not ok:
+            # Fayl ko'chirilgan / o'chirilgan - buxgalter qayta tashlasa
+            # do_import uni shu yerga qaytaradi
+            res["missing"].append(sf["filename"])
+            continue
+        if progress:
+            progress(i, len(todo), "eski chek fayli: %s" % sf["filename"])
+        a, n, _w = reparse_file(cx, engine, sf, path)
+        res["files"] += 1
+        res["docs"] += a
+        res["lines"] += n
+    return res
+
+
+def _import_docs(cx, engine, parsed, source_file_id, quiet_dups=False):
     added = skipped = nlines = 0
 
     for doc in parsed["documents"]:
@@ -56,9 +134,10 @@ def _import_docs(cx, engine, parsed, source_file_id):
                         (doc["doc_key"],)).fetchone()
         if ex:
             skipped += 1
-            DB.add_issue(cx, doc.get("doc_year"), C.SEVERITY_INFO, "duplicate_doc",
-                         "Hujjat allaqachon kiritilgan: %s" % (doc.get("doc_no") or "?"),
-                         "document", ex["id"])
+            if not quiet_dups:
+                DB.add_issue(cx, doc.get("doc_year"), C.SEVERITY_INFO, "duplicate_doc",
+                             "Hujjat allaqachon kiritilgan: %s" % (doc.get("doc_no") or "?"),
+                             "document", ex["id"])
             continue
 
         cur = cx.execute(
@@ -185,7 +264,11 @@ def _rebuild(cx, progress=None):
     """).fetchall()
 
     total = len(rows)
-    # product_id -> partiyalar [ [lot_id, qty_left, unit_cost, lot_date], ... ]
+    # Bir tovarning bir necha kartochkasi (bh_matching.product_groups) bitta
+    # zaxira sifatida yuritiladi: sotuv qaysi kartochkaga bog'langan bo'lsa
+    # ham, guruhdagi eng eski partiyadan yechiladi.
+    grp = M.load_product_groups(cx)
+    # guruh ildizi -> partiyalar [ [lot_id, qty_left, unit_cost, lot_date], ... ]
     open_lots = {}
     last_cost = {}
     n_alloc = n_short = n_late = 0
@@ -227,8 +310,9 @@ def _rebuild(cx, progress=None):
             "qty_in,qty_left,unit_cost,markup,is_opening,source_year) "
             "VALUES(?,?,?,?,?,?,?,?,0,?)",
             (pid, r["id"], dt, year, str(q), str(q), str(cost), str(markup), year))
-        open_lots.setdefault(pid, []).append([cur.lastrowid, q, cost, dt])
-        last_cost[pid] = cost
+        g = grp.get(pid, pid)
+        open_lots.setdefault(g, []).append([cur.lastrowid, q, cost, dt])
+        last_cost[g] = cost
 
     # =======================================================================
     # 2-BOSQICH: sotuvlar
@@ -265,6 +349,7 @@ def _rebuild(cx, progress=None):
 
     for i, r in enumerate(sales):
         pid = r["product_id"]
+        g = grp.get(pid, pid)
         q = DB.D(r["qty"])
         dt = r["dt"] or ""
         year = r["doc_year"]
@@ -274,17 +359,17 @@ def _rebuild(cx, progress=None):
         if q < 0:
             # Qaytarish: tovar omborga qaytadi (eng oxirgi tannarx bilan)
             back = -q
-            cost = last_cost.get(pid) or ZERO
+            cost = last_cost.get(g) or ZERO
             cur = cx.execute(
                 "INSERT INTO stock_lot(product_id,doc_line_id,lot_date,lot_year,"
                 "qty_in,qty_left,unit_cost,markup,is_opening,source_year) "
                 "VALUES(?,?,?,?,?,?,?,?,0,?)",
                 (pid, r["id"], dt, year, str(back), str(back), str(cost),
                  str(DB.get_markup(cx, year or 0)), year))
-            open_lots.setdefault(pid, []).insert(0, [cur.lastrowid, back, cost, dt])
+            open_lots.setdefault(g, []).insert(0, [cur.lastrowid, back, cost, dt])
             continue
 
-        lots = open_lots.get(pid, [])
+        lots = open_lots.get(g, [])
 
         # a) sotuv sanasida ochiq partiyalardan
         need = _consume(lots, q, r["id"], pid, dt, year)
@@ -307,7 +392,7 @@ def _rebuild(cx, progress=None):
 
         # c) butun davrda ham yo'q
         if need > 0:
-            est = last_cost.get(pid)
+            est = last_cost.get(g)
             if est is None:
                 gross = DB.D(r["amount_gross"])
                 mk = DB.get_markup(cx, year or 0)
@@ -461,13 +546,19 @@ def year_rows(cx, year):
     for r in cx.execute("""
             SELECT a.product_id, a.alloc_date, SUM(CAST(a.qty AS REAL)) q,
                    AVG(CAST(a.unit_cost AS REAL)) c, p.canon_name, p.mxik,
-                   p.mxik_name, p.unit
+                   p.mxik_name, p.unit,
+                   SUM(CAST(a.qty AS REAL) * CAST(l.amount_gross AS REAL)
+                       / NULLIF(CAST(l.qty AS REAL), 0)) g
             FROM allocation a JOIN product p ON p.id=a.product_id
+            JOIN doc_line l ON l.id = a.sale_line_id
             WHERE a.shortfall=1 AND a.alloc_date >= ? AND a.alloc_date <= ?
             GROUP BY a.product_id
         """, (y0, y1)):
         q = DB.D(r["q"])
         cost = DB.D(r["c"])
+        # sotuv summasi - chekdagi haqiqiy summa (taxminiy narxdan emas)
+        gross = C.money(DB.D(r["g"])) if r["g"] is not None else \
+            C.money(q * C.sale_price_from_cost(cost, default_markup))
         out.append({
             "lot_id": None, "product_id": r["product_id"], "date": r["alloc_date"],
             "name": r["canon_name"], "is_marked": None, "marking_code": "",
@@ -480,8 +571,43 @@ def year_rows(cx, year):
             "out_qty": C.qty(q), "out_sum": C.money(q * cost),
             "close_qty": C.qty(-q), "close_sum": C.money(-q * cost),
             "sale_qty": C.qty(q),
-            "sale_sum": C.money(q * C.sale_price_from_cost(cost, default_markup)),
+            "sale_sum": gross,
             "shortfall": True,
+        })
+
+    # Hech qaysi kirimga bog'lanmagan sotuvlar. Ilgari ular ТХ ga umuman
+    # tushmasdi - kirim fakturasi yo'q tovar (masalan "MEBEL") sotilgan oy
+    # hisobotdan butunlay yo'qolardi. Endi nom + oy bo'yicha qizil satr:
+    # miqdor va sotuv summasi aniq, tannarx sotuv narxidan taxminiy.
+    # Buxgalter "Bog'lash" oynasida bog'lasa, satr oddiy partiyaga o'tadi.
+    for r in cx.execute("""
+            SELECT l.norm_name, MIN(l.raw_name) raw_name, MIN(l.mxik) mxik,
+                   MIN(l.unit_raw) unit_raw, MIN(COALESCE(l.line_date, d.doc_date)) dt,
+                   SUM(CAST(l.qty AS REAL)) q, SUM(CAST(l.amount_gross AS REAL)) g,
+                   MAX(l.is_marked) is_marked
+            FROM doc_line l JOIN document d ON d.id = l.document_id
+            WHERE l.kind='chiqim' AND l.product_id IS NULL
+              AND COALESCE(l.line_date, d.doc_date) >= ?
+              AND COALESCE(l.line_date, d.doc_date) <= ?
+            GROUP BY l.norm_name, substr(COALESCE(l.line_date, d.doc_date), 1, 7)
+        """, (y0, y1 + "~")):
+        q = C.qty(DB.D(r["q"]))
+        if q == 0:
+            continue
+        gross = C.money(DB.D(r["g"]))
+        sale_price = C.money(gross / q)
+        cost = C.money(C.net_from_gross(sale_price) / (1 + default_markup))
+        out.append({
+            "lot_id": None, "product_id": None, "date": r["dt"],
+            "name": r["raw_name"], "is_marked": r["is_marked"], "marking_code": "",
+            "mxik": r["mxik"] or "", "mxik_name": "", "unit": r["unit_raw"] or "",
+            "sale_price": sale_price, "markup": default_markup, "cost": cost,
+            "open_qty": ZERO, "open_sum": ZERO,
+            "in_qty": ZERO, "in_sum": ZERO,
+            "out_qty": q, "out_sum": C.money(q * cost),
+            "close_qty": -q, "close_sum": C.money(-q * cost),
+            "sale_qty": q, "sale_sum": gross,
+            "shortfall": True, "unmatched": True,
         })
 
     out.sort(key=lambda x: (x["date"] or "", x["name"] or ""))

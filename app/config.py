@@ -11,9 +11,14 @@ import re
 import unicodedata
 from decimal import Decimal, ROUND_HALF_UP
 
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 APP_TITLE = "Buxgalteriya hisoboti generatori"
 SCHEMA_VERSION = 1
+
+# Chek fayli o'quvchisining versiyasi. Oshirilsa, bazadagi eski chek
+# fayllari bir marta qayta o'qiladi (bh_fifo.reparse_old_checks).
+#   2 - barcha varaqlar va <dimension> dan keyingi satrlar ham o'qiladi
+CHECKS_PARSER_VER = 2
 
 # ---------------------------------------------------------------------------
 # Soliq / narx qoidalari
@@ -132,7 +137,15 @@ def parse_date(s):
         return s.date()
     if isinstance(s, datetime.date):
         return s
+    # Excel sana raqami (1900 tizimi): 46027.41 -> 2026-01-05.
+    # Katak "Sana" formatisiz saqlangan bo'lsa openpyxl shunday qaytaradi.
+    if isinstance(s, (int, float, Decimal)) and not isinstance(s, bool):
+        if 20000 <= float(s) <= 80000:          # ~1954..2119 yillar
+            return datetime.date(1899, 12, 30) + datetime.timedelta(days=int(float(s)))
+        return None
     t = str(s).strip()
+    if re.match(r"^\d{5}(\.\d+)?$", t):
+        return parse_date(float(t))
     if not t:
         return None
     for rx, order in _DATE_PATTERNS:

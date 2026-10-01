@@ -413,7 +413,8 @@ def write_info_sheet(wb, cx, years, S, totals_by_year):
     notes = [
         "Eslatmalar:",
         "  - Qizil bo'yalgan satr: tovar sotilgan, lekin kirim hujjati topilmadi "
-        "(tannarx taxminiy).",
+        "yoki sotuv kirimga bog'lanmagan (tannarx sotuv narxidan taxminiy). "
+        "'Bog'lash' oynasida bog'lansa, oddiy satrga aylanadi.",
         "  - Sariq bo'yalgan satr: davr oxiriga qoldiq manfiy yoki chek qaytarilgan.",
         "  - Davr boshiga qoldiq o'tgan yildan avtomatik ko'chiriladi (FIFO).",
         "  - Chiqim tannarxi FIFO bo'yicha: eng eski partiyadan yechiladi.",
@@ -450,6 +451,9 @@ def generate(cx, out_path, years=None, owner_name=None, progress=None):
         progress(0, 0, 'ombor yangilanmoqda')
     try:
         _eng = _M.MatchEngine(cx)
+        # 1.3.0 gacha to'liq o'qilmagan chek fayllari (bir marta)
+        F.reparse_old_checks(cx, _eng)
+        _eng.reload()
         _M.auto_match_all(cx, _eng)
     except Exception:
         pass

@@ -29,7 +29,11 @@ METHOD_EXACT = ("name", 0.98, True)
 METHOD_PREFIX = ("prefix", 0.94, True)
 METHOD_FUZZY_MXIK = ("fuzzy+mxik", 0.0, True)     # ball hisoblanadi
 METHOD_FUZZY = ("fuzzy", 0.0, False)
-METHOD_MXIK_UNIQUE = ("mxik", 0.70, False)
+# MXIK ostida bitta tovar (yoki bitta tovarning kartochkalari) bo'lsa -
+# avtomatik. Aks holda sotuv umuman bog'lanmay, hisobotdan tushib qolardi.
+# Umumiy MXIK (08517001001000000 -> 21 telefon) bu qoidaga tushmaydi,
+# chunki u yerda tovar bitta emas.
+METHOD_MXIK_UNIQUE = ("mxik", 0.90, True)
 METHOD_MANUAL = ("manual", 1.00, True)
 
 AUTO_ACCEPT_SCORE = 0.88      # shundan yuqori - avtomatik
@@ -38,6 +42,61 @@ SUGGEST_SCORE = 0.55          # shundan yuqori - taklif sifatida ko'rsatiladi
 
 def _tokens(norm):
     return [t for t in norm.split() if len(t) > 1]
+
+
+# ---------------------------------------------------------------------------
+# Bir xil tovarning bir nechta kartochkasi
+#
+# Faktura nomi ham kesilib keladi, shuning uchun bitta tovar ikki kartochka
+# bo'lib qoladi (haqiqiy ma'lumotdan):
+#   "Велосипеды двухколёсные, ... с номинальной мощностью 240"
+#   "Велосипеды двухколёсные, ... с номинальной мощностью 240 Вт"
+#   "Мотороллер электрический, ... для перевозки грузов"
+#   "Мотороллер электрический, ... для перевозки грузов, DRONGO"
+# Kassa nomi ikkalasiga ham mos keladi, moslashtirish birini tanlay
+# olmasdi va sotuv bog'lanmay qolardi - butun oy hisobotdan tushib qolardi.
+#
+# Qoida: MXIK bir xil VA qisqa nom uzun nomning boshlanishi bo'lsa - bitta
+# tovar. Guruh ildizi = eng kichik id (birinchi kirim).
+# ---------------------------------------------------------------------------
+SAME_ITEM_MIN_LEN = 25
+
+
+def same_item(n1, n2):
+    a, b = (n1, n2) if len(n1) <= len(n2) else (n2, n1)
+    return len(a) >= SAME_ITEM_MIN_LEN and b.startswith(a)
+
+
+def product_groups(products):
+    """{product_id: guruh_ildizi}. products = {pid: {norm_name, mxik, ...}}."""
+    parent = {pid: pid for pid in products}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    by_mxik = defaultdict(list)
+    for pid, p in products.items():
+        m = (p.get("mxik") or "").strip()
+        if m:
+            by_mxik[m].append(pid)
+    for pids in by_mxik.values():
+        pids.sort()
+        for i, a in enumerate(pids):
+            na = products[a].get("norm_name") or ""
+            for b in pids[i + 1:]:
+                if same_item(na, products[b].get("norm_name") or ""):
+                    ra, rb = find(a), find(b)
+                    if ra != rb:
+                        parent[max(ra, rb)] = min(ra, rb)
+    return {pid: find(pid) for pid in products}
+
+
+def load_product_groups(cx):
+    return product_groups({r["id"]: dict(r) for r in
+                           cx.execute("SELECT id, norm_name, mxik FROM product")})
 
 
 def _model_codes(norm):
@@ -100,6 +159,19 @@ class MatchEngine:
             for mc in _model_codes(n):
                 self._model_idx[mc].add(pid)
 
+        self._groups = None
+
+    def group_of(self, pid):
+        """Mahsulot guruhining ildizi (bir xil tovar kartochkalari)."""
+        if self._groups is None:
+            self._groups = product_groups(self.products)
+        return self._groups.get(pid, pid)
+
+    def _single_item(self, pids):
+        """pids hammasi bitta tovarmi? Bo'lsa - guruh ildizi, aks holda None."""
+        roots = {self.group_of(p) for p in pids}
+        return roots.pop() if len(roots) == 1 else None
+
     # -- mahsulot yaratish (faqat KIRIM satridan) -----------------------
     def ensure_product(self, line):
         """
@@ -145,6 +217,7 @@ class MatchEngine:
         if line.get("mxik"):
             self.by_mxik[line["mxik"]].append(pid)
         self.by_alias[norm] = pid
+        self._groups = None
         return pid
 
     def _learn(self, pid, line):
@@ -211,6 +284,10 @@ class MatchEngine:
             hits = self._prefix_candidates(norm)
             if len(hits) == 1:
                 return hits[0], METHOD_PREFIX[0], METHOD_PREFIX[1], []
+            root = self._single_item(hits) if len(hits) > 1 else None
+            if root is not None:
+                # bir tovarning bir necha kartochkasi - ombor ularni birga yuritadi
+                return root, METHOD_PREFIX[0], METHOD_PREFIX[1], []
             if len(hits) > 1:
                 # bir nechta nomzod - modelga qarab tanlanadi
                 best = self._rank(norm, mxik, hits)
@@ -233,11 +310,11 @@ class MatchEngine:
                 else METHOD_FUZZY[0]
             return ranked[0][0], meth, ranked[0][1], ranked[1:6]
 
-        # 8) MXIK ostida yagona mahsulot bo'lsa - taklif (avtomatik emas)
-        if mxik and len(set(self.by_mxik.get(mxik, []))) == 1:
-            pid = self.by_mxik[mxik][0]
-            if not ranked or ranked[0][0] != pid:
-                ranked = [(pid, METHOD_MXIK_UNIQUE[1], "MXIK yagona")] + list(ranked)
+        # 8) MXIK ostida bitta tovar bo'lsa - avtomatik
+        if mxik and self.by_mxik.get(mxik):
+            root = self._single_item(self.by_mxik[mxik])
+            if root is not None:
+                return root, METHOD_MXIK_UNIQUE[0], METHOD_MXIK_UNIQUE[1], ranked[:6]
 
         return None, "", 0.0, [r for r in ranked if r[1] >= SUGGEST_SCORE][:6]
 
@@ -267,12 +344,19 @@ class MatchEngine:
             if not p:
                 continue
             pn = p["norm_name"] or ""
+            floor = 0.0
             score = difflib.SequenceMatcher(None, norm, pn).ratio()
             reason = "o'xshashlik %.0f%%" % (score * 100)
             # to'liq nom kassa nomi bilan boshlansa - kuchli dalil
             if pn.startswith(norm[: max(10, len(norm) - 2)]) and len(norm) > 20:
                 score = max(score, 0.95)
                 reason = "kesilgan nomga mos"
+            # aksincha: kassa nomi = faktura nomi + rang/izoh
+            # ("ЛДСП 2750*1830*16мм Серый графит" <- "ЛДСП 2750*1830*16мм")
+            elif mxik and (p["mxik"] or "") == mxik and len(pn) >= 12 and \
+                    norm.startswith(pn + " "):
+                floor = 0.93           # so'z o'xshashligi bilan aralashtirilmaydi
+                reason = "faktura nomi + izoh"
             # model kodi aynan uchrasa - juda kuchli dalil
             pmodels = _model_codes(pn)
             if nmodels and pmodels and (nmodels & pmodels):
@@ -281,6 +365,7 @@ class MatchEngine:
             elif nmodels and pmodels and not (nmodels & pmodels):
                 score -= 0.25          # model boshqa - deyarli aniq boshqa tovar
                 reason += ", MODEL BOSHQA"
+                floor = 0.0
             if mxik and (p["mxik"] or "") == mxik:
                 score = min(1.0, score + 0.05)
                 reason += ", MXIK mos"
@@ -290,6 +375,7 @@ class MatchEngine:
             if ntok and ptok:
                 jac = len(ntok & ptok) / float(len(ntok | ptok))
                 score = (score * 0.75) + (jac * 0.25)
+            score = max(score, floor)
             out.append((pid, round(max(0.0, min(1.0, score)), 4), reason))
         out.sort(key=lambda x: -x[1])
         return out

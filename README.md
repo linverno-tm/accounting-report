@@ -122,6 +122,9 @@ Bular haqiqiy fayllar ustida o'lchandi - kodda ham izohlangan:
 | Kassa mahsulot nomi | **63 belgida kesiladi**. Shuning uchun prefiks bo'yicha moslashtiriladi. |
 | MXIK kodi | Kalit bo'la olmaydi: `08517001001000000` -> 21 xil telefon. |
 | Ustama | Yillik emas, satr bo'yicha: 3% / 5% / 10% aralash uchraydi. |
+| `checks-info` varaqi | `<dimension>` yozuvi noto'g'ri bo'lishi mumkin - `reset_dimensions()` siz oxirgi oylar jimgina tushib qoladi. Barcha varaqlar o'qiladi. |
+| Kassa nomi `MEBEL` | Fakturada umuman yo'q tovar. Bog'lanmagan sotuv ham ТХ ga qizil satr bo'lib tushadi - aks holda butun oy yo'qoladi. |
+| Bir tovar - ikki kartochka | Faktura nomi ham kesiladi (`...240` / `...240 Вт`). MXIK bir xil va nom prefiks bo'lsa - bitta tovar, ombor birga yuritiladi. |
 
 ## Eski hisobotdagi nuqsonlar (bu ilova tuzatadi)
 

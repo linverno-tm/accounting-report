@@ -305,50 +305,86 @@ def parse_faktura_html(path):
 # ===========================================================================
 # 2. CHIQIM - checks-info XLSX
 # ===========================================================================
-def _rows_from_xlsx(path):
+def _sheets_from_xlsx(path):
+    """
+    Har varaqning satrlari: [(varaq_nomi, [satr, ...]), ...]
+
+    !!! read_only rejimida openpyxl varaqning <dimension> yozuviga ishonadi
+    va undan keyingi satrlarni JIMGINA tashlab ketadi. Eksport qiluvchi
+    dasturlar bu yozuvni ko'pincha noto'g'ri qo'yadi (masalan A1:T8) -
+    natijada 12 oylik chek faylidan faqat birinchi 1-2 oy o'qilardi.
+    reset_dimensions() varaqni oxirigacha o'qishga majburlaydi.
+
+    Barcha varaqlar o'qiladi: oylar alohida varaqlarda bo'lishi mumkin.
+    """
     import openpyxl
 
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
-        ws = wb.worksheets[0]
-        for row in ws.iter_rows(values_only=True):
-            yield row
+        out = []
+        for ws in wb.worksheets:
+            try:
+                ws.reset_dimensions()
+            except AttributeError:
+                pass
+            out.append((ws.title, list(ws.iter_rows(values_only=True))))
+        return out
     finally:
         wb.close()
 
 
+def _is_checks_header(row):
+    vals = [C.norm_name(v) for v in (row or ())]
+    return any("маҳсулот номи" in v or "махсулот номи" in v for v in vals) and \
+        any("чек санаси" in v for v in vals)
+
+
 def _find_checks_header(rows):
-    """Sarlavha satrining indeksini va ustun xaritasini topadi."""
-    for i, row in enumerate(rows[:12]):
-        vals = [C.norm_name(v) for v in row]
-        if any("маҳсулот номи" in v or "махсулот номи" in v for v in vals) and \
-           any("чек санаси" in v for v in vals):
+    """Sarlavha satrining indeksi."""
+    for i, row in enumerate(rows[:30]):
+        if _is_checks_header(row):
             return i
     return None
 
 
 def parse_checks_xlsx(path):
     warnings = []
-    rows = list(_rows_from_xlsx(path))
-    if not rows:
-        return {"documents": [], "warnings": ["%s: bo'sh fayl" % os.path.basename(path)]}
+    fname = os.path.basename(path)
+    sheets = _sheets_from_xlsx(path)
+    if not any(rows for _t, rows in sheets):
+        return {"documents": [], "warnings": ["%s: bo'sh fayl" % fname]}
 
-    hi = _find_checks_header(rows)
-    if hi is None:
+    # Sarlavhasi bor har varaqdan sarlavhadan keyingi satrlar yig'iladi
+    data_rows = []
+    found = False
+    for _title, rows in sheets:
+        hi = _find_checks_header(rows)
+        if hi is None:
+            continue
+        found = True
+        data_rows.extend(rows[hi + 1:])
+    if not found:
         return {"documents": [],
-                "warnings": ["%s: 'Чеклар рўйхати' sarlavhasi topilmadi" % os.path.basename(path)]}
+                "warnings": ["%s: 'Чеклар рўйхати' sarlavhasi topilmadi" % fname]}
 
     F = C.CHECKS_COLUMNS
     checks = OrderedDict()
+    no_date = 0
 
-    for row in rows[hi + 1:]:
+    for row in data_rows:
         if row is None or row[0] is None or str(row[0]).strip() == "":
+            continue
+        # Bir nechta eksport bitta varaqqa qo'shib yuborilgan bo'lsa,
+        # sarlavha o'rtada takrorlanadi
+        if _is_checks_header(row):
             continue
         r = {}
         for j, field in enumerate(F):
             r[field] = row[j] if j < len(row) else None
 
         dt = C.parse_date(r["check_dt"])
+        if dt is None:
+            no_date += 1
         pos_id = str(r["pos_id"] or "").strip()
         check_no = str(r["check_no"] or "").strip()
         if check_no.endswith(".0"):
@@ -444,6 +480,10 @@ def parse_checks_xlsx(path):
         doc.pop("_dt_raw", None)
         docs.append(doc)
 
+    if no_date:
+        # Sanasiz chek hech qaysi yilga tushmaydi - hisobotda ko'rinmaydi
+        warnings.append("%s: %d satrda chek sanasi o'qilmadi - bu satrlar hisobotga "
+                        "tushmaydi" % (fname, no_date))
     return {"documents": docs, "warnings": warnings}
 
 
