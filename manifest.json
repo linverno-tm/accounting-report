@@ -1,11 +1,11 @@
 {
-  "version": "1.5.2",
-  "generated": "2026-10-01T15:35:22",
+  "version": "1.6.0",
+  "generated": "2026-10-01T15:43:51",
   "modules": [
     {
       "name": "bh_config",
       "path": "app/config.py",
-      "sha256": "2655669ad7e2cc9258aa6e1bd1af33cf5b40522da4090453e4a980df18753509",
+      "sha256": "b24d34c78c0f220820d942cc997e4cbcce4b9dc1c9286eb0f7d8d643bacf1a3c",
       "bytes": 18743
     },
     {
@@ -35,8 +35,8 @@
     {
       "name": "bh_report",
       "path": "app/report.py",
-      "sha256": "9c7df8011e4d8f35076fe882383a7e45b760b6cb0d9454feabe58bfc6ef1e6a0",
-      "bytes": 21715
+      "sha256": "8514f7295d975cf21d932c0d9f197311fea99678ebd88497605e20c87170dcb8",
+      "bytes": 38161
     },
     {
       "name": "bh_ui",

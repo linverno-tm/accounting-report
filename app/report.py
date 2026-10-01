@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-bh_report - "КАМЕРАЛ ТЕКШИРУВЛАР" ko'rinishidagi Excel hisobotini yozadi.
+bh_report - "КАМЕРАЛ ТЕКШИРУВЛАР" Excel hisoboti. HISOB-KITOB EXCEL FORMULALARIDA
+(1.6.0, egasi talabi): ilova faqat ma'lumotni yozadi, kirim, chiqim (FIFO), qoldiq,
+sotish narxi va jamilarni Excelning o'zi hisoblaydi. Batafsil - build_formula_workbook.
 
-Varaqlar mavjud fayldagidek:
-    касса YYYY  - kassa cheklari (20 ustun)
-    YYYY ТХ     - tovar harakati (22 ustun, ikki qavatli sarlavha)
-    Xatolar     - YANGI: tekshiruv natijalari
-    Ma'lumot    - YANGI: hisobot qanday yig'ilgani
+Varaqlar:
+    Ma'lumot    - QQS va ustama (sariq katak), yillar jamisi, oylar jadvali
+    Фактуралар  - har faktura bir satr
+    Кирим       - har faktura satri
+    касса YYYY  - kassa cheklari (20 ustun) + tovar kodi
+    YYYY ТХ     - tovar harakati (22 ustun, ikki qavatli sarlavha), hammasi formula
+    Xatolar     - tekshiruv natijalari
 
-Chiqish formati .xlsx. Eski fayl .xls (BIFF8) edi, lekin Python'da .xls
-yozish kutubxonalari tashlab yuborilgan. .xlsx Excel'da bir xil ochiladi.
+Chiqish formati .xlsx.
 """
 
 import os
@@ -113,200 +116,6 @@ class StyleBook:
         return nm
 
 
-def _f(v):
-    """Decimal -> Excel raqami (float). Excel Decimal'ni tushunmaydi."""
-    if v is None:
-        return None
-    if isinstance(v, Decimal):
-        return float(v)
-    return v
-
-
-# ===========================================================================
-# ТХ varag'i
-# ===========================================================================
-def write_tx_sheet(wb, cx, year, owner_name, S, owner_tin=None):
-    from openpyxl.utils import get_column_letter
-
-    ws = wb.create_sheet("%d ТХ" % year)
-    rows = F.year_rows(cx, year, owner_tin)
-    tot = F.year_totals(rows)
-    ncol = len(C.TX_COLUMNS)
-
-    # --- 1-satr: sarlavha ---
-    ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=ncol)
-    c = ws.cell(row=1, column=2, value="%s ning %d йил товар хисоботи" % (owner_name, year))
-    c.style = S.name("title")
-    ws.row_dimensions[1].height = 26
-
-    # --- 2-satr: jami ko'rsatkichlar ---
-    ws.cell(row=2, column=11, value="Кирим жами:")
-    ws.cell(row=2, column=12, value=_f(tot["in_sum"])).number_format = NUM_MONEY
-    ws.cell(row=2, column=14, value="Чиқим жами:")
-    ws.cell(row=2, column=15, value=_f(tot["out_sum"])).number_format = NUM_MONEY
-    ws.cell(row=2, column=17, value="Қолдиқ:")
-    ws.cell(row=2, column=18, value=_f(tot["close_sum"])).number_format = NUM_MONEY
-    ws.cell(row=2, column=20, value="Соф фойда:")
-    ws.cell(row=2, column=21, value=_f(tot["profit"])).number_format = NUM_MONEY
-    for col in (11, 14, 17, 20):
-        ws.cell(row=2, column=col).font = S.font_total
-
-    # --- 3-4 satr: ikki qavatli sarlavha ---
-    hr, sr = 3, 4
-    for i, (_idx, name, width) in enumerate(C.TX_COLUMNS):
-        col = i + 1
-        ws.column_dimensions[get_column_letter(col)].width = width
-    # guruhlanmagan ustunlar 3-4 satrni egallaydi
-    grouped = set()
-    for a, b, _t in C.TX_GROUPS:
-        grouped.update(range(a, b + 1))
-    for i, (idx, name, _w) in enumerate(C.TX_COLUMNS):
-        col = i + 1
-        if idx in grouped:
-            continue
-        ws.merge_cells(start_row=hr, start_column=col, end_row=sr, end_column=col)
-        ws.cell(row=hr, column=col, value=name).style = S.name("hdr")
-    for a, b, title in C.TX_GROUPS:
-        ws.merge_cells(start_row=hr, start_column=a + 1, end_row=hr, end_column=b + 1)
-        ws.cell(row=hr, column=a + 1, value=title).style = S.name("hdr")
-        for idx in range(a, b + 1):
-            ws.cell(row=sr, column=idx + 1,
-                    value=C.TX_COLUMNS[idx][1]).style = S.name("sub")
-    ws.row_dimensions[hr].height = 34
-    ws.row_dimensions[sr].height = 18
-
-    # --- ma'lumot satrlari ---
-    # Har ustunning stili BIR MARTA hisoblanadi, rangli satr uchun tayyor
-    # variant olinadi - satrni bo'yash uchun ikkinchi marta aylanish yo'q.
-    def _row_styles(tint):
-        out = []
-        for i in range(ncol):
-            if i == 1:
-                out.append(S.name("cell", NUM_DATE, tint))
-            elif i == 0:
-                out.append(S.name("num", "0", tint))
-            elif i in (7, 10, 13, 16, 19):
-                out.append(S.name("num", NUM_QTY, tint))
-            elif i >= 6:
-                out.append(S.name("num", NUM_MONEY, tint))
-            else:
-                out.append(S.name("cell", None, tint))
-        return out
-
-    st_plain, st_warn, st_err = (_row_styles(None), _row_styles("warn"),
-                                 _row_styles("err"))
-    r = sr + 1
-    for n, d in enumerate(rows, start=1):
-        vals = [
-            n,
-            C.parse_date(d["date"]),
-            d["name"],
-            ("маркировкаланган" if d["is_marked"] else
-             ("маркировкасиз" if d["is_marked"] is False else "")),
-            ("%s - %s" % (d["mxik"], d["mxik_name"])).strip(" -") if d["mxik"] else "",
-            d["unit"],
-            _f(d["sale_price"]),
-            _f(d["open_qty"]), _f(d["cost"]), _f(d["open_sum"]),
-            _f(d["in_qty"]), _f(d["cost"]), _f(d["in_sum"]),
-            _f(d["out_qty"]), _f(d["cost"]), _f(d["out_sum"]),
-            _f(d["close_qty"]), _f(d["cost"]), _f(d["close_sum"]),
-            _f(d["sale_qty"]),
-            _f(d["sale_price"]), _f(d["sale_sum"]),
-        ]
-        if d.get("shortfall"):
-            sty = st_err
-        elif d["close_qty"] < 0:
-            sty = st_warn
-        else:
-            sty = st_plain
-        for i, v in enumerate(vals):
-            ws.cell(row=r, column=i + 1, value=v).style = sty[i]
-        r += 1
-
-    # --- jami satri ---
-    tot_plain = S.name("total")
-    tot_qty = S.name("total", NUM_QTY)
-    tot_money = S.name("total", NUM_MONEY)
-    ws.cell(row=r, column=1, value="ЖАМИ").style = tot_plain
-    for col in range(2, ncol + 1):
-        ws.cell(row=r, column=col).style = tot_plain
-    pairs = [(8, tot["open_qty"]), (10, tot["open_sum"]),
-             (11, tot["in_qty"]), (13, tot["in_sum"]),
-             (14, tot["out_qty"]), (16, tot["out_sum"]),
-             (17, tot["close_qty"]), (19, tot["close_sum"]),
-             (20, tot["out_qty"]), (22, tot["sale_sum"])]
-    for col, val in pairs:
-        cell = ws.cell(row=r, column=col, value=_f(val))
-        cell.style = tot_qty if col in (8, 11, 14, 17, 20) else tot_money
-
-    ws.freeze_panes = ws.cell(row=sr + 1, column=4)
-    if r > sr + 1:
-        ws.auto_filter.ref = "A%d:%s%d" % (sr, get_column_letter(ncol), r - 1)
-    ws.sheet_view.zoomScale = 90
-    return len(rows), tot
-
-
-# ===========================================================================
-# Kassa varag'i
-# ===========================================================================
-def write_kassa_sheet(wb, cx, year, S, progress=None, owner_tin=None):
-    from openpyxl.utils import get_column_letter
-
-    ws = wb.create_sheet("касса %d" % year)
-    widths = [34, 16, 16, 19, 11, 46, 10, 15, 13, 13, 13, 15, 15, 14, 19, 13,
-              14, 16, 20, 11]
-    for i, w in enumerate(widths):
-        ws.column_dimensions[get_column_letter(i + 1)].width = w
-
-    for i, h in enumerate(C.KASSA_HEADERS):
-        ws.cell(row=1, column=i + 1, value=h).style = S.name("hdr")
-    ws.row_dimensions[1].height = 32
-
-    # Ustun stillari oldindan (qaytarish satrlari uchun sariq variant ham)
-    def _kassa_styles(tint):
-        out = []
-        for i in range(len(C.KASSA_HEADERS)):
-            if i == 6:
-                out.append(S.name("num", NUM_QTY, tint))
-            elif i in (7, 8, 9, 10, 11, 12, 13):
-                out.append(S.name("num", NUM_MONEY, tint))
-            else:
-                out.append(S.name("cell", None, tint))
-        return out
-
-    st_plain, st_warn = _kassa_styles(None), _kassa_styles("warn")
-    r = 2
-    n = 0
-    for d in cx.execute("""
-            SELECT l.*, d.doc_no, d.doc_date, d.pos_id, d.partner_tin, d.check_type,
-                   d.total_gross, d.total_vat, d.is_return
-            FROM doc_line l JOIN document d ON d.id=l.document_id
-            WHERE l.kind='chiqim' AND d.doc_year=? AND (? IS NULL OR d.owner_tin = ?)
-            ORDER BY d.doc_date, d.doc_no, l.line_no""", (year, owner_tin, owner_tin)):
-        cash = DB.D(0)
-        card = DB.D(d["total_gross"])
-        vals = [
-            "", d["partner_tin"], d["pos_id"], d["doc_date"], d["doc_no"],
-            d["raw_name"], _f(DB.D(d["qty"])), _f(DB.D(d["amount_gross"])),
-            0, 0, _f(DB.D(d["vat_amount"])),
-            _f(cash), _f(card), _f(DB.D(d["total_vat"])),
-            d["mxik"], d["unit_raw"], d["barcode"], "", d["marking_code"],
-            d["check_type"],
-        ]
-        sty = st_warn if d["is_return"] else st_plain
-        for i, v in enumerate(vals):
-            ws.cell(row=r, column=i + 1, value=v).style = sty[i]
-        r += 1
-        n += 1
-        if progress and n % 2000 == 0:
-            progress(n)
-
-    ws.freeze_panes = "A2"
-    if n:
-        ws.auto_filter.ref = "A1:%s%d" % (get_column_letter(len(C.KASSA_HEADERS)), r - 1)
-    ws.sheet_view.zoomScale = 90
-    return n
-
 
 # ===========================================================================
 # Xatolar varag'i (YANGI)
@@ -362,95 +171,6 @@ def write_issues_sheet(wb, cx, years, S, owner_tin=None):
 
 
 # ===========================================================================
-# Ma'lumot varag'i (YANGI)
-# ===========================================================================
-def write_info_sheet(wb, cx, years, S, totals_by_year, owner_tin=None):
-    from openpyxl.utils import get_column_letter
-
-    ws = wb.create_sheet("Ma'lumot", 0)
-    ws.column_dimensions["A"].width = 40
-    ws.column_dimensions["B"].width = 30
-    ws.column_dimensions["C"].width = 22
-    ws.column_dimensions["D"].width = 22
-    ws.column_dimensions["E"].width = 22
-
-    r = 1
-    ws.cell(row=r, column=1, value="Hisobot qanday yig'ilgani").style = S.name("title")
-    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
-    r += 2
-
-    st = DB.stats(cx)
-    if owner_tin:
-        # Sonlar shu tashkilot bo'yicha
-        def one(sql):
-            return cx.execute(sql, (owner_tin,)).fetchone()[0]
-        st.update({
-            "files": one("SELECT COUNT(DISTINCT source_file_id) FROM document WHERE owner_tin=?"),
-            "docs_in": one("SELECT COUNT(*) FROM document WHERE kind='kirim' AND owner_tin=?"),
-            "docs_out": one("SELECT COUNT(*) FROM document WHERE kind='chiqim' AND owner_tin=?"),
-            "lines_in": one("SELECT COUNT(*) FROM doc_line l JOIN document d ON d.id=l.document_id "
-                            "WHERE l.kind='kirim' AND d.owner_tin=?"),
-            "lines_out": one("SELECT COUNT(*) FROM doc_line l JOIN document d ON d.id=l.document_id "
-                             "WHERE l.kind='chiqim' AND d.owner_tin=?"),
-            "unmatched": one("SELECT COUNT(*) FROM doc_line l JOIN document d ON d.id=l.document_id "
-                             "WHERE l.product_id IS NULL AND d.owner_tin=?"),
-        })
-    info = [
-        ("Tashkilot STIRi", owner_tin or "hammasi"),
-        ("Yaratilgan sana", datetime.datetime.now().strftime("%d.%m.%Y %H:%M")),
-        ("Dastur versiyasi", C.VERSION),
-        ("QQS stavkasi", "%s%%" % (C.VAT_RATE * 100)),
-        ("", ""),
-        ("Import qilingan fayl", st["files"]),
-        ("Kirim hujjati (faktura)", st["docs_in"]),
-        ("Chiqim hujjati (chek)", st["docs_out"]),
-        ("Kirim satri", st["lines_in"]),
-        ("Chiqim satri", st["lines_out"]),
-        ("Mahsulot kartochkasi", st["products"]),
-        ("Bog'lanmagan satr", st["unmatched"]),
-        ("Ochiq tekshiruv yozuvi", st["issues"]),
-    ]
-    for k, v in info:
-        if k:
-            ws.cell(row=r, column=1, value=k).font = S.font_cell
-            ws.cell(row=r, column=2, value=v).font = S.font_total
-        r += 1
-
-    r += 1
-    ws.cell(row=r, column=1, value="Yillar bo'yicha").style = S.name("hdr")
-    for i, h in enumerate(["Kirim (tannarx)", "Chiqim (tannarx)",
-                           "Qoldiq (tannarx)", "Sotuv (QQS bilan)"]):
-        ws.cell(row=r, column=i + 2, value=h).style = S.name("hdr")
-    r += 1
-    for y in years:
-        t = totals_by_year.get(y)
-        if not t:
-            continue
-        ws.cell(row=r, column=1, value=y).font = S.font_total
-        for i, k in enumerate(("in_sum", "out_sum", "close_sum", "sale_sum")):
-            c = ws.cell(row=r, column=i + 2, value=_f(t[k]))
-            c.number_format = NUM_MONEY
-        r += 1
-
-    r += 1
-    notes = [
-        "Eslatmalar:",
-        "  - Qizil bo'yalgan satr: tovar sotilgan, lekin kirim hujjati topilmadi "
-        "yoki sotuv kirimga bog'lanmagan (tannarx sotuv narxidan taxminiy). "
-        "'Bog'lash' oynasida bog'lansa, oddiy satrga aylanadi.",
-        "  - Sariq bo'yalgan satr: davr oxiriga qoldiq manfiy yoki chek qaytarilgan.",
-        "  - Davr boshiga qoldiq o'tgan yildan avtomatik ko'chiriladi (FIFO).",
-        "  - Chiqim tannarxi FIFO bo'yicha: eng eski partiyadan yechiladi.",
-        "  - Kassa 'Нархи' ustuni satr SUMMASI (QQS ichida), birlik narxi emas.",
-    ]
-    for t in notes:
-        ws.cell(row=r, column=1, value=t).font = S.font_cell
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
-        r += 1
-    return ws
-
-
-# ===========================================================================
 # Asosiy
 # ===========================================================================
 def generate(cx, out_path, years=None, owner_name=None, progress=None, owner_tin=None):
@@ -459,8 +179,6 @@ def generate(cx, out_path, years=None, owner_name=None, progress=None, owner_tin
 
     owner_tin - qaysi tashkilot (STIR) hisoboti. Berilmasa - hammasi (eski xulq).
     """
-    import openpyxl
-
     years = years or DB.available_years(cx, owner_tin)
     years = sorted(y for y in years if y)
     if not years:
@@ -485,53 +203,11 @@ def generate(cx, out_path, years=None, owner_name=None, progress=None, owner_tin
     except Exception:
         pass
     F.rebuild_stock(cx)
-
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)
-    S = StyleBook(wb)
-
-    stats = {"years": {}, "kassa_rows": 0, "tx_rows": 0}
-    totals_by_year = {}
-    steps = len(years) * 2 + 2
-    step = 0
-
     for y in years:
         F.validate_year(cx, y, owner_tin)
-        n = write_kassa_sheet(
-            wb, cx, y, S,
-            progress=(lambda k, _y=y, _s=step: progress(_s, steps, "касса %d (%d satr)" % (_y, k)))
-            if progress else None, owner_tin=owner_tin)
-        stats["kassa_rows"] += n
-        step += 1
-        if progress:
-            progress(step, steps, "касса %d" % y)
 
-    for y in years:
-        nrows, tot = write_tx_sheet(wb, cx, y, owner_name, S, owner_tin)
-        stats["tx_rows"] += nrows
-        stats["years"][y] = tot
-        totals_by_year[y] = tot
-        step += 1
-        if progress:
-            progress(step, steps, "%d ТХ" % y)
-
-    n_iss = write_issues_sheet(wb, cx, years, S, owner_tin)
-    stats["issues"] = n_iss
-    step += 1
-    if progress:
-        progress(step, steps, "Xatolar")
-
-    write_info_sheet(wb, cx, years, S, totals_by_year, owner_tin)
-    step += 1
-    if progress:
-        progress(step, steps, "Ma'lumot")
-
-    d = os.path.dirname(os.path.abspath(out_path))
-    if d and not os.path.isdir(d):
-        os.makedirs(d, exist_ok=True)
-    wb.save(out_path)
-    wb.close()
-    return out_path, stats
+    # Hisob-kitob Excel formulalarida (1.6.0) - ilova faqat ma'lumotni yozadi
+    return build_formula_workbook(cx, out_path, years, owner_name, owner_tin, progress)
 
 
 def default_filename(years, owner_name=None):
@@ -547,3 +223,569 @@ def default_filename(years, owner_name=None):
         # fayl nomiga tashkilotning birinchi ikki so'zi (Windows taqiqlagan belgilarsiz)
         tail = " " + " ".join(re.sub(r'[\\/:*?"<>|]+', " ", owner_name).split()[:2])
     return "КАМЕРАЛ ТЕКШИРУВЛАР %s%s.xlsx" % (rng, tail)
+
+
+# ===========================================================================
+# FORMULALI HISOBOT (1.6.0)
+#
+# Egasi: "excellarni hisoblashni formula orqali qilsin - ilova sen qilib berma,
+# ilova excel formulalaridan foydalanib hisoblasin". Shuning uchun:
+#   Ma'lumot     - QQS va ustama SARIQ katakda (nomli: QQS, USTAMA_YYYY); ularni
+#                  o'zgartirsa - butun fayl qayta hisoblanadi; oylar jadvali
+#                  (COUNTIFS / SUMIFS); jamilar ТХ ga havola.
+#   Фактуралар   - har faktura bir satr: satrlar soni va summasi - formula.
+#   Кирим        - har faktura satri: summa = miqdor x narx (formula).
+#   касса YYYY   - har chek satri + "Товар коди" (ilova bog'lagan tovar).
+#   YYYY ТХ      - asl 22 ustun, HAMMA son formula:
+#                    kirim  = INDEX(Кирим), narx = INDEX(Кирим)
+#                    chiqim = FIFO: shu tovarning yil davomida sotilgani (SUMIFS
+#                             касса) minus yuqoridagi (eskiroq) partiyalarda bori
+#                    qoldiq = boshiga + kirim - chiqim
+#                    boshiga qoldiq = o'tgan yil ТХ dagi shu partiyaning qoldig'i
+#                    sotish narxi = tannarx x (1+ustama) x (1+QQS)
+#   Xatolar      - oddiy so'z bilan.
+# Formulada qilib bo'lmaydigan yagona ish - chekdagi sotuvni qaysi tovarga bog'lash
+# (bh_matching); uning natijasi "Товар коди" ustunida ochiq turibdi.
+# Excel faylni ochganda hamma formulani o'zi hisoblaydi (fullCalcOnLoad).
+# ===========================================================================
+MONTHS_UZ = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август",
+             "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+SH_INFO = "Ma'lumot"
+SH_FAKT = "Фактуралар"
+SH_KIRIM = "Кирим"
+NAME_VAT = "QQS"
+
+
+def _txt(v):
+    """Ma'lumot matni "=" bilan boshlansa Excel uni formula deb o'qimasin."""
+    return (" " + v) if isinstance(v, str) and v.startswith("=") else v
+
+
+def _r4(x):
+    return round(float(x or 0) + 0.0, 4)
+
+
+def _q(sheet):
+    return "'%s'" % sheet.replace("'", "''")
+
+
+def _kassa_name(y):
+    return "касса %d" % y
+
+
+def _tx_name(y):
+    return "%d ТХ" % y
+
+
+def _mk_name(y):
+    return "USTAMA_%d" % y
+
+
+def _gkey(g):
+    return "Т%05d" % g
+
+
+def _ukey(i):
+    return "Б%04d" % i
+
+
+def _formula_data(cx, owner_tin, years):
+    """Bazadan formulali hisobot uchun xom ma'lumot (tanlangan tashkilot)."""
+    import bh_matching as M
+
+    roots = M.load_product_groups(cx)
+
+    def root(pid):
+        return None if pid is None else roots.get(pid, pid)
+
+    own = (owner_tin, owner_tin)
+    lines = [dict(r) for r in cx.execute("""
+        SELECT l.id, l.kind, l.document_id doc_id, l.line_no, l.raw_name, l.norm_name, l.mxik,
+               l.mxik_name, l.barcode, l.marking_code, l.is_marked, l.unit_raw,
+               CAST(l.qty AS REAL) qty, CAST(l.unit_price_net AS REAL) price,
+               CAST(l.vat_amount AS REAL) vat, CAST(l.amount_gross AS REAL) gross,
+               l.product_id, l.match_method, COALESCE(l.line_date, d.doc_date) dt,
+               d.doc_no, d.doc_date, d.partner_name, d.partner_tin, d.pos_id, d.check_type,
+               d.is_return, CAST(d.total_gross AS REAL) doc_gross, CAST(d.total_vat AS REAL) doc_vat,
+               sf.filename
+        FROM doc_line l JOIN document d ON d.id = l.document_id
+        LEFT JOIN source_file sf ON sf.id = d.source_file_id
+        WHERE (? IS NULL OR d.owner_tin = ?) AND COALESCE(l.line_date, d.doc_date) IS NOT NULL
+        ORDER BY COALESCE(l.line_date, d.doc_date), d.id, l.line_no, l.id""", own)]
+    last = max(years)
+    lines = [l for l in lines if int(l["dt"][:4]) <= last]
+    for l in lines:
+        l["group"] = root(l["product_id"])
+    kirim = [l for l in lines if l["kind"] == "kirim"]
+    sales = [l for l in lines if l["kind"] == "chiqim"]
+
+    # bog'lanmagan sotuvlar: nom bo'yicha kalit, kattasidan
+    ug = {}
+    for s in sales:
+        if s["group"] is None:
+            g = ug.setdefault(s["norm_name"], {"gross": 0.0})
+            g["gross"] += s["gross"] or 0
+    ukeys = {n: _ukey(i + 1) for i, (n, _g) in
+             enumerate(sorted(ug.items(), key=lambda kv: -kv[1]["gross"]))}
+    for s in sales:
+        s["key"] = _gkey(s["group"]) if s["group"] is not None else ukeys.get(s["norm_name"], "")
+    for k in kirim:
+        k["key"] = _gkey(k["group"]) if k["group"] is not None else ""
+
+    # fakturalar (hujjat bo'yicha)
+    fakt, seen = [], set()
+    for k in kirim:
+        if k["doc_id"] in seen or not k["doc_date"]:
+            continue
+        seen.add(k["doc_id"])
+        fakt.append(k)
+    return {"kirim": kirim, "sales": sales, "fakt": fakt}
+
+
+def _tx_rows(kirim, sales, year, markup):
+    """
+    Bir yil uchun ТХ satrlari - Excel formulasi bilan AYNAN bir xil hisob (satrlar
+    ro'yxatini tuzish va jamilarni ilova oynasida ko'rsatish uchun).
+    """
+    lots = sorted([k for k in kirim if k["group"] is not None and (k["qty"] or 0) > 0
+                   and int(k["dt"][:4]) <= year], key=lambda k: (k["dt"], k["id"]))
+    sold = {}
+    for s in sales:
+        if s["group"] is None:
+            continue
+        y = int(s["dt"][:4])
+        sold.setdefault(s["group"], {})
+        sold[s["group"]][y] = _r4(sold[s["group"]].get(y, 0) + (s["qty"] or 0))
+    left, rows = {}, []
+    first = int(lots[0]["dt"][:4]) if lots else year
+    for y in range(min(first, year), year + 1):
+        by_g = {}
+        for l in lots:
+            if int(l["dt"][:4]) <= y:
+                by_g.setdefault(l["group"], []).append(l)
+        for g, gl in by_g.items():
+            need = sold.get(g, {}).get(y, 0)
+            for l in gl:
+                ly = int(l["dt"][:4])
+                op = left.get(l["id"], 0) if ly < y else 0
+                inq = l["qty"] if ly == y else 0
+                av = _r4(op + inq)
+                out = min(av, max(0, need))
+                need = _r4(need - out)
+                left[l["id"]] = _r4(av - out)
+                if y == year and (op or inq or out):
+                    rows.append({"kind": "lot", "lot": l, "key": _gkey(g), "date": l["dt"],
+                                 "name": l["raw_name"], "cost": l["price"] or 0,
+                                 "open": _r4(op), "in": _r4(inq), "out": _r4(out)})
+            if y == year and need > 0:
+                lt = gl[-1]
+                rows.append({"kind": "short", "lot": lt, "key": _gkey(g), "date": "%d-12-31" % year,
+                             "name": lt["raw_name"], "cost": lt["price"] or 0,
+                             "open": 0, "in": 0, "out": _r4(need)})
+    with_lots = {l["group"] for l in lots}
+    other = {}
+    for s in sales:
+        if int(s["dt"][:4]) != year:
+            continue
+        if s["group"] is None or s["group"] not in with_lots:
+            other.setdefault(s["key"], []).append(s)
+    for key, ss in other.items():
+        q = _r4(sum(s["qty"] or 0 for s in ss))
+        if not q:
+            continue
+        g = _r4(sum(s["gross"] or 0 for s in ss))
+        cost = _r4(g / q / (1 + float(C.VAT_RATE)) / (1 + markup))
+        f = min(ss, key=lambda s: s["dt"])
+        rows.append({"kind": "unmatched", "lot": f, "key": key, "date": f["dt"],
+                     "name": f["raw_name"], "cost": cost, "open": 0, "in": 0, "out": q})
+    rank = {"lot": 0, "short": 1, "unmatched": 2}
+    rows.sort(key=lambda r: (r["date"], rank[r["kind"]], r["name"] or ""))
+    for r in rows:
+        r["close"] = _r4(r["open"] + r["in"] - r["out"])
+        r["sale_price"] = _r4(r["cost"] * (1 + markup) * (1 + float(C.VAT_RATE)))
+    return rows
+
+
+def _style_cells(ws, row, cols, numfmt=None, font=None, fill=None, border=None, align=None):
+    for c in cols:
+        cell = ws.cell(row=row, column=c)
+        if numfmt:
+            cell.number_format = numfmt
+        if font is not None:
+            cell.font = font
+        if fill is not None:
+            cell.fill = fill
+        if border is not None:
+            cell.border = border
+        if align is not None:
+            cell.alignment = align
+
+
+def build_formula_workbook(cx, out_path, years, owner_name, owner_tin=None, progress=None):
+    """Formulali «КАМЕРАЛ ТЕКШИРУВЛАР». (yo'l, statistika) qaytaradi."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    from openpyxl.workbook.defined_name import DefinedName
+
+    years = sorted(years)
+    year = years[-1]
+    data = _formula_data(cx, owner_tin, years)
+    kirim, sales = data["kirim"], data["sales"]
+    vat = float(C.VAT_RATE)
+    markups = {y: float(DB.get_markup(cx, y)) for y in years}
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    try:
+        wb.calculation.fullCalcOnLoad = True
+    except Exception:
+        pass
+    S = StyleBook(wb)
+
+    thin = Side(style="thin", color="9AA0A6")
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    f_hdr = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+    fill_hdr = PatternFill("solid", fgColor="44546A")
+    fill_sub = PatternFill("solid", fgColor="5B7397")
+    fill_tot = PatternFill("solid", fgColor="D9E2F3")
+    fill_err = PatternFill("solid", fgColor="FCE4E4")
+    fill_warn = PatternFill("solid", fgColor="FFF2CC")
+    fill_in = PatternFill("solid", fgColor="FFF9DB")
+    a_hdr = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    f_bold = Font(name="Calibri", size=10, bold=True)
+
+    def hdr(ws, r, c, text, sub=False):
+        cell = ws.cell(row=r, column=c, value=text)
+        cell.font, cell.alignment, cell.border = f_hdr, a_hdr, box
+        cell.fill = fill_sub if sub else fill_hdr
+
+    info = wb.create_sheet(SH_INFO)
+    fakt = wb.create_sheet(SH_FAKT)
+    kir = wb.create_sheet(SH_KIRIM)
+    for y in years:
+        wb.create_sheet(_kassa_name(y))
+    for y in years:
+        wb.create_sheet(_tx_name(y))
+
+    # ------------------------------------------------ Ma'lumot: sozlama katakchalari
+    for col, w in zip("ABCDEFG", (3, 44, 22, 22, 22, 22, 22)):
+        info.column_dimensions[col].width = w
+    info.merge_cells("B1:G1")
+    info["B1"] = "%s - tovar hisoboti (КАМЕРАЛ ТЕКШИРУВЛАР)" % (owner_name or "Ташкилот")
+    info["B1"].font = Font(size=16, bold=True, color="1F3864")
+    info["B3"], info["C3"] = "STIR", owner_tin or "hammasi"
+    info["B4"], info["C4"] = "Tayyorlangan", datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
+    info["B5"], info["C5"] = "Dastur versiyasi", C.VERSION
+    info["B7"] = "Sozlamalar (sariq katakni o'zgartirsangiz - butun fayl qayta hisoblanadi)"
+    info["B7"].font = Font(size=12, bold=True)
+    info["B8"], info["C8"] = "QQS stavkasi", vat
+    info["C8"].number_format, info["C8"].fill, info["C8"].border = "0.00%", fill_in, box
+    wb.defined_names[NAME_VAT] = DefinedName(NAME_VAT, attr_text="%s!$C$8" % _q(SH_INFO))
+    r = 9
+    for y in years:
+        info.cell(row=r, column=2, value="Ustama %d yil (tannarxga qo'shiladi)" % y)
+        c = info.cell(row=r, column=3, value=markups[y])
+        c.number_format, c.fill, c.border = "0.00%", fill_in, box
+        wb.defined_names[_mk_name(y)] = DefinedName(_mk_name(y), attr_text="%s!$C$%d" % (_q(SH_INFO), r))
+        r += 1
+    info_tot_row = r + 1
+
+    # ------------------------------------------------ Фактуралар
+    for col, w in zip("ABCDEFGH", (6, 12, 18, 44, 16, 10, 18, 52)):
+        fakt.column_dimensions[col].width = w
+    fakt["A1"] = "Qo'shilgan hisob-fakturalar - har biri bir satr"
+    fakt["A1"].font = Font(size=14, bold=True)
+    for i, h in enumerate(["№", "Sana", "Faktura raqami", "Yetkazib beruvchi", "STIR", "Satrlar",
+                           "Summa (QQS bilan)", "Fayl nomi"]):
+        hdr(fakt, 3, i + 1, h)
+    kq = _q(SH_KIRIM)
+    fr = 4
+    for i, d in enumerate(data["fakt"]):
+        fakt.cell(row=fr, column=1, value=i + 1)
+        fakt.cell(row=fr, column=2, value=C.parse_date(d["doc_date"])).number_format = NUM_DATE
+        fakt.cell(row=fr, column=3, value=_txt(d["doc_no"]))
+        fakt.cell(row=fr, column=4, value=_txt(d["partner_name"]))
+        fakt.cell(row=fr, column=5, value=d["partner_tin"])
+        fakt.cell(row=fr, column=6, value="=COUNTIFS(%s!$B:$B,C%d,%s!$D:$D,E%d)" % (kq, fr, kq, fr))
+        fakt.cell(row=fr, column=7, value="=SUMIFS(%s!$L:$L,%s!$B:$B,C%d,%s!$D:$D,E%d)" % (kq, kq, fr, kq, fr)
+                  ).number_format = NUM_MONEY
+        fakt.cell(row=fr, column=8, value=_txt(d["filename"]))
+        _style_cells(fakt, fr, range(1, 9), border=box)
+        fr += 1
+    fakt.cell(row=fr, column=4, value="JAMI faktura:")
+    fakt.cell(row=fr, column=5, value="=COUNTA(C4:C%d)" % (fr - 1))
+    fakt.cell(row=fr, column=6, value="=SUM(F4:F%d)" % (fr - 1))
+    fakt.cell(row=fr, column=7, value="=SUM(G4:G%d)" % (fr - 1)).number_format = NUM_MONEY
+    _style_cells(fakt, fr, range(1, 9), font=f_bold, fill=fill_tot)
+    fakt.freeze_panes = "A4"
+    if fr > 4:
+        fakt.auto_filter.ref = "A3:H%d" % (fr - 1)
+
+    # ------------------------------------------------ Кирим
+    for col, w in zip("ABCDEFGHIJKLMN", (11, 18, 34, 14, 50, 20, 14, 11, 16, 18, 16, 18, 10, 10)):
+        kir.column_dimensions[col].width = w
+    kir["A1"] = "Kirim - hisob-fakturalardagi har bir tovar satri (narx QQS siz)"
+    kir["A1"].font = Font(size=14, bold=True)
+    for i, h in enumerate(["Sana", "Faktura raqami", "Yetkazib beruvchi", "STIR", "Tovar nomi", "MXIK",
+                           "O'lchov birligi", "Miqdori", "Narxi (QQS siz)", "Summasi (miqdor x narx)",
+                           "QQS", "QQS bilan", "Tovar kodi", "Partiya №"]):
+        hdr(kir, 3, i + 1, h)
+    kr = 4
+    for k in kirim:
+        kir.cell(row=kr, column=1, value=C.parse_date(k["dt"])).number_format = NUM_DATE
+        kir.cell(row=kr, column=2, value=_txt(k["doc_no"]))
+        kir.cell(row=kr, column=3, value=_txt(k["partner_name"]))
+        kir.cell(row=kr, column=4, value=k["partner_tin"])
+        kir.cell(row=kr, column=5, value=_txt(k["raw_name"]))
+        kir.cell(row=kr, column=6, value=k["mxik"])
+        kir.cell(row=kr, column=7, value=k["unit_raw"])
+        kir.cell(row=kr, column=8, value=_r4(k["qty"])).number_format = NUM_QTY
+        kir.cell(row=kr, column=9, value=_r4(k["price"])).number_format = NUM_MONEY
+        kir.cell(row=kr, column=10, value="=H%d*I%d" % (kr, kr)).number_format = NUM_MONEY
+        kir.cell(row=kr, column=11, value=_r4(k["vat"])).number_format = NUM_MONEY
+        kir.cell(row=kr, column=12, value="=J%d+K%d" % (kr, kr)).number_format = NUM_MONEY
+        kir.cell(row=kr, column=13, value=k["key"])
+        kir.cell(row=kr, column=14, value=k["id"])
+        kr += 1
+    kir.cell(row=kr, column=5, value="JAMI")
+    for c, fmt in ((8, NUM_QTY), (10, NUM_MONEY), (11, NUM_MONEY), (12, NUM_MONEY)):
+        L = get_column_letter(c)
+        kir.cell(row=kr, column=c, value="=SUBTOTAL(9,%s4:%s%d)" % (L, L, kr - 1)).number_format = fmt
+    _style_cells(kir, kr, range(1, 15), font=f_bold, fill=fill_tot)
+    kir.freeze_panes = "A4"
+    if kr > 4:
+        kir.auto_filter.ref = "A3:N%d" % (kr - 1)
+
+    # ------------------------------------------------ касса YYYY
+    KH = ["Махсулот\nИдси", "СТИР/\nЖИШШР", "ФМ рақами", "Чек санаси", "Чек рақами", "Маҳсулот номи",
+          "Миқдори", "Нархи\n(сатр суммаси)", "Чегирма суммаси", "Дисконт суммаси", "ҚҚС суммаси",
+          "Жами нақд пул", "Жами банк карта", "Жами ҚҚС", "Маҳсулот коди", "Ўлчов бирлиги коди",
+          "Штрих код", "Воситачи СТИРи (ЖИШШРи)", "Маркировка\nкоди", "Чек тури",
+          "Tovar kodi\n(ТХ dagi)", "Qanday bog'langan", "Chek\n(1-satr)"]
+    KW = [30, 16, 16, 12, 10, 46, 11, 18, 11, 11, 16, 15, 16, 15, 19, 12, 14, 14, 20, 11, 12, 22, 9]
+    HOW = {"barcode": "Shtrix-kod bo'yicha", "marking": "Markirovka bo'yicha", "alias": "Avval tanlangan",
+           "name": "Nomi bir xil", "prefix": "Nomi (qisqartirilgan)", "fuzzy": "Nomi o'xshash",
+           "fuzzy+mxik": "Nomi o'xshash, MXIK bir xil", "mxik": "MXIK bo'yicha", "manual": "Qo'lda tanlangan"}
+    kassa_rows = 0
+    for y in years:
+        ws = wb[_kassa_name(y)]
+        for i, w in enumerate(KW):
+            ws.column_dimensions[get_column_letter(i + 1)].width = w
+        for i, h in enumerate(KH):
+            hdr(ws, 1, i + 1, h)
+        ws.row_dimensions[1].height = 32
+        rr, seen_doc = 2, set()
+        for s in sales:
+            if int(s["dt"][:4]) != y:
+                continue
+            first = s["doc_id"] not in seen_doc
+            seen_doc.add(s["doc_id"])
+            vals = ["", s["partner_tin"], s["pos_id"], C.parse_date(s["dt"]), s["doc_no"], s["raw_name"],
+                    _r4(s["qty"]), _r4(s["gross"]), 0, 0, _r4(s["vat"]), 0,
+                    _r4(s["doc_gross"]) if first else None, _r4(s["doc_vat"]) if first else None,
+                    s["mxik"], s["unit_raw"], s["barcode"], "", s["marking_code"], s["check_type"],
+                    s["key"], HOW.get(s["match_method"], "Bog'lanmagan") if s["group"] is not None
+                    else "Bog'lanmagan", 1 if first else None]
+            for i, v in enumerate(vals):
+                ws.cell(row=rr, column=i + 1, value=_txt(v))
+            ws.cell(row=rr, column=4).number_format = NUM_DATE
+            ws.cell(row=rr, column=7).number_format = NUM_QTY
+            for c in (8, 11, 12, 13, 14):
+                ws.cell(row=rr, column=c).number_format = NUM_MONEY
+            if s["is_return"]:
+                _style_cells(ws, rr, range(1, 24), fill=fill_warn)
+            elif s["group"] is None:
+                _style_cells(ws, rr, (21, 22), fill=fill_err)
+            rr += 1
+            kassa_rows += 1
+        ws.cell(row=rr, column=6, value="JAMI")
+        for c, fmt in ((7, NUM_QTY), (8, NUM_MONEY), (11, NUM_MONEY), (23, "0")):
+            L = get_column_letter(c)
+            ws.cell(row=rr, column=c, value="=SUBTOTAL(9,%s2:%s%d)" % (L, L, max(2, rr - 1))).number_format = fmt
+        _style_cells(ws, rr, range(1, 24), font=f_bold, fill=fill_tot)
+        ws.freeze_panes = "A2"
+        if rr > 2:
+            ws.auto_filter.ref = "A1:W%d" % (rr - 1)
+
+    # ------------------------------------------------ YYYY ТХ
+    TH = ["№", "санаси", "Товар номи", "Маркировкаланган", "МХИК Коди", "Ўлчов бирлиги",
+          "1 бирликни сотиш нархи\n(таннарх+устама+ҚҚС)"]
+    TG = [(8, "давр бошига қолдиқ (таннарх)"), (11, "Кирим (таннарх)"), (14, "Чиқим (таннарх)"),
+          (17, "давр охирига қолдиқ таннархда"), (20, "Чиқим сотиш нархида ҚҚС билан")]
+    TW = [6, 11, 46, 16, 40, 16, 16, 12, 16, 19, 12, 16, 19, 12, 16, 19, 12, 16, 19, 12, 16, 19, 11, 9]
+    stats = {"years": {}, "kassa_rows": kassa_rows, "tx_rows": 0}
+    tot_cells = {}
+    for yi, y in enumerate(years):
+        if progress:
+            progress(yi, len(years), "%d ТХ" % y)
+        ws = wb[_tx_name(y)]
+        ks = _q(_kassa_name(y))
+        prev = _q(_tx_name(y - 1)) if (y - 1) in years else None
+        mk = _mk_name(y)
+        rows = _tx_rows(kirim, sales, y, markups[y])
+        for i, w in enumerate(TW):
+            ws.column_dimensions[get_column_letter(i + 1)].width = w
+        ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=22)
+        ws.cell(row=1, column=2, value="%s ning %d йил товар хисоботи" % (owner_name or "Ташкилот", y)).font = \
+            Font(size=14, bold=True, color="1F3864")
+        for i, h in enumerate(TH):
+            ws.merge_cells(start_row=3, start_column=i + 1, end_row=4, end_column=i + 1)
+            hdr(ws, 3, i + 1, h)
+        for c, title in TG:
+            ws.merge_cells(start_row=3, start_column=c, end_row=3, end_column=c + 2)
+            hdr(ws, 3, c, title)
+            for j, sub in enumerate(("Микдори", "Нархи", "суммаси")):
+                hdr(ws, 4, c + j, sub, sub=True)
+        for c, title in ((23, "Tovar kodi"), (24, "Partiya №")):
+            ws.merge_cells(start_row=3, start_column=c, end_row=4, end_column=c)
+            hdr(ws, 3, c, title)
+        ws.row_dimensions[3].height = 34
+
+        first_r = 5
+        for i, x in enumerate(rows):
+            rr = first_r + i
+            lot = x["lot"]
+            is_lot = x["kind"] == "lot"
+            this_year = is_lot and x["date"][:4] == str(y)
+            sold = "SUMIFS(%s!$G:$G,%s!$U:$U,$W%d)" % (ks, ks, rr)
+            above = lambda col: "SUMIFS(%s$4:%s%d,$W$4:$W%d,$W%d)" % (col, col, rr - 1, rr - 1, rr)
+            name = x["name"] or ""
+            if x["kind"] == "unmatched":
+                name += "  (fakturasi topilmadi)"
+            elif x["kind"] == "short":
+                name += "  (omborda yetmadi)"
+            mark = lot.get("is_marked")
+            ws.cell(row=rr, column=1, value=i + 1)
+            ws.cell(row=rr, column=2, value=C.parse_date(x["date"])).number_format = NUM_DATE
+            ws.cell(row=rr, column=3, value=_txt(name))
+            ws.cell(row=rr, column=4, value="маркировкаланган" if mark else ("маркировкасиз" if mark == 0 else ""))
+            ws.cell(row=rr, column=5, value=("%s - %s" % (lot.get("mxik") or "", lot.get("mxik_name") or "")).strip(" -"))
+            ws.cell(row=rr, column=6, value=lot.get("unit_raw") or "")
+            if is_lot:
+                ws.cell(row=rr, column=9, value="=INDEX(%s!$I:$I,MATCH($X%d,%s!$N:$N,0))" % (kq, rr, kq))
+            elif x["kind"] == "unmatched":
+                ws.cell(row=rr, column=9, value="=IFERROR(SUMIFS(%s!$H:$H,%s!$U:$U,$W%d)/%s/(1+%s)/(1+%s),0)"
+                        % (ks, ks, rr, sold, NAME_VAT, mk))
+            else:
+                ws.cell(row=rr, column=9, value=_r4(x["cost"]))
+            ws.cell(row=rr, column=7, value="=I%d*(1+%s)*(1+%s)" % (rr, mk, NAME_VAT))
+            if is_lot and not this_year:
+                ws.cell(row=rr, column=8, value=("=IFERROR(INDEX(%s!$Q:$Q,MATCH($X%d,%s!$X:$X,0)),0)" % (prev, rr, prev))
+                        if prev else x["open"])
+            else:
+                ws.cell(row=rr, column=8, value=0)
+            ws.cell(row=rr, column=10, value="=H%d*I%d" % (rr, rr))
+            ws.cell(row=rr, column=11, value=("=INDEX(%s!$H:$H,MATCH($X%d,%s!$N:$N,0))" % (kq, rr, kq)) if this_year else 0)
+            ws.cell(row=rr, column=12, value="=I%d" % rr)
+            ws.cell(row=rr, column=13, value="=K%d*L%d" % (rr, rr))
+            # CHIQIM - FIFO: yil davomida sotilgani minus yuqoridagi (eskiroq) partiyalarda bori
+            if is_lot:
+                ws.cell(row=rr, column=14, value="=MIN(H%d+K%d,MAX(0,%s-%s-%s))" % (rr, rr, sold, above("H"), above("K")))
+            else:
+                ws.cell(row=rr, column=14, value="=MAX(0,%s-%s-%s)" % (sold, above("H"), above("K")))
+            ws.cell(row=rr, column=15, value="=I%d" % rr)
+            ws.cell(row=rr, column=16, value="=N%d*O%d" % (rr, rr))
+            ws.cell(row=rr, column=17, value="=H%d+K%d-N%d" % (rr, rr, rr))
+            ws.cell(row=rr, column=18, value="=I%d" % rr)
+            ws.cell(row=rr, column=19, value="=Q%d*R%d" % (rr, rr))
+            ws.cell(row=rr, column=20, value="=N%d" % rr)
+            ws.cell(row=rr, column=21, value="=G%d" % rr)
+            ws.cell(row=rr, column=22, value="=T%d*U%d" % (rr, rr))
+            ws.cell(row=rr, column=23, value=x["key"])
+            ws.cell(row=rr, column=24, value=lot["id"] if is_lot else None)
+            for c in (8, 11, 14, 17, 20):
+                ws.cell(row=rr, column=c).number_format = NUM_QTY
+            for c in (7, 9, 10, 12, 13, 15, 16, 18, 19, 21, 22):
+                ws.cell(row=rr, column=c).number_format = NUM_MONEY
+            if not is_lot:
+                _style_cells(ws, rr, range(1, 25), fill=fill_err)
+            elif x["close"] < 0:
+                _style_cells(ws, rr, range(1, 25), fill=fill_warn)
+
+        tr = first_r + len(rows)
+        last_r = tr - 1
+        ws.cell(row=tr, column=1, value="ЖАМИ")
+        for c in (8, 10, 11, 13, 14, 16, 17, 19, 20, 22):
+            L = get_column_letter(c)
+            ws.cell(row=tr, column=c, value=("=SUBTOTAL(9,%s%d:%s%d)" % (L, first_r, L, last_r)) if rows else 0
+                    ).number_format = NUM_QTY if c in (8, 11, 14, 17, 20) else NUM_MONEY
+        _style_cells(ws, tr, range(1, 25), font=f_bold, fill=fill_tot)
+        for c, label, formula in ((11, "Кирим жами:", "=M%d" % tr), (14, "Чиқим жами:", "=P%d" % tr),
+                                  (17, "Қолдиқ:", "=S%d" % tr),
+                                  (20, "Соф фойда:", "=V%d/(1+%s)-P%d" % (tr, NAME_VAT, tr))):
+            ws.cell(row=2, column=c, value=label).font = f_bold
+            cell = ws.cell(row=2, column=c + 1, value=formula)
+            cell.number_format, cell.font = NUM_MONEY, f_bold
+        ws.freeze_panes = ws.cell(row=5, column=4)
+        if rows:
+            ws.auto_filter.ref = "A4:X%d" % last_r
+        tot_cells[y] = tr
+        T = {"in_sum": sum(r["in"] * r["cost"] for r in rows),
+             "out_sum": sum(r["out"] * r["cost"] for r in rows),
+             "close_sum": sum(r["close"] * r["cost"] for r in rows),
+             "sale_sum": sum(r["out"] * r["sale_price"] for r in rows)}
+        T = {k: C.money(Decimal(str(round(v, 4)))) for k, v in T.items()}
+        T["profit"] = C.money(C.net_from_gross(T["sale_sum"]) - T["out_sum"])
+        stats["years"][y] = T
+        stats["tx_rows"] += len(rows)
+
+    # ------------------------------------------------ Ma'lumot: jamilar va oylar
+    r = info_tot_row
+    info.cell(row=r, column=2, value="Yillar bo'yicha (ТХ varag'idan)").font = Font(size=12, bold=True)
+    r += 1
+    for i, h in enumerate(["Yil", "Kirim (tannarx)", "Chiqim (tannarx)", "Qoldiq (tannarx)",
+                           "Sotuv (ТХ, QQS bilan)", "Kassa tushumi (cheklar)"]):
+        hdr(info, r, i + 2, h)
+    r += 1
+    for y in years:
+        tx, tr = _q(_tx_name(y)), tot_cells[y]
+        info.cell(row=r, column=2, value=y)
+        for c, col in ((3, "M"), (4, "P"), (5, "S"), (6, "V")):
+            info.cell(row=r, column=c, value="=%s!%s%d" % (tx, col, tr)).number_format = NUM_MONEY
+        ks = _q(_kassa_name(y))
+        info.cell(row=r, column=7, value='=SUMIFS(%s!$H:$H,%s!$F:$F,"<>JAMI")' % (ks, ks)).number_format = NUM_MONEY
+        _style_cells(info, r, range(2, 8), border=box)
+        r += 1
+    r += 1
+    info.cell(row=r, column=2, value="%d yil - oylar bo'yicha (har oy to'liq qo'shilganini shu yerdan "
+                                      "tekshiring)" % year).font = Font(size=12, bold=True)
+    r += 1
+    for i, h in enumerate(["Oy", "Fakturalar soni", "Kirim (QQS bilan)", "Cheklar soni", "Kassa tushumi", "Holati"]):
+        hdr(info, r, i + 2, h)
+    r += 1
+    fq, kyq = _q(SH_FAKT), _q(_kassa_name(year))
+    for m in range(1, 13):
+        a, b = "DATE(%d,%d,1)" % (year, m), "EOMONTH(DATE(%d,%d,1),0)" % (year, m)
+        info.cell(row=r, column=2, value=MONTHS_UZ[m - 1])
+        info.cell(row=r, column=3, value='=COUNTIFS(%s!$B:$B,">="&%s,%s!$B:$B,"<="&%s)' % (fq, a, fq, b))
+        info.cell(row=r, column=4, value='=SUMIFS(%s!$L:$L,%s!$A:$A,">="&%s,%s!$A:$A,"<="&%s)'
+                  % (kq, kq, a, kq, b)).number_format = NUM_MONEY
+        info.cell(row=r, column=5, value='=SUMIFS(%s!$W:$W,%s!$D:$D,">="&%s,%s!$D:$D,"<="&%s)' % (kyq, kyq, a, kyq, b))
+        info.cell(row=r, column=6, value='=SUMIFS(%s!$H:$H,%s!$D:$D,">="&%s,%s!$D:$D,"<="&%s)'
+                  % (kyq, kyq, a, kyq, b)).number_format = NUM_MONEY
+        info.cell(row=r, column=7, value='=IF(AND(C%d=0,E%d=0),"ma\'lumot yo\'q",IF(E%d=0,"chek yo\'q",'
+                                         'IF(C%d=0,"faktura yo\'q","bor")))' % (r, r, r, r))
+        _style_cells(info, r, range(2, 8), border=box)
+        r += 1
+    r += 1
+    for t in ["Qanday o'qish kerak:",
+              "  - Bu fayldagi hamma hisob - Excel formulasi. Katakni bosing - formulasi ko'rinadi.",
+              "  - Sariq katakdagi QQS yoki ustamani o'zgartirsangiz, ТХ va jamilar o'zi qayta hisoblanadi.",
+              "  - Chiqim tannarxi FIFO: avval eng eski partiyadan yechiladi (ТХ, \"Чиқим\" ustuni formulasi).",
+              "  - Davr boshiga qoldiq o'tgan yil ТХ varag'idagi shu partiyaning qoldig'idan olinadi.",
+              "  - Qizil satr: tovar sotilgan, lekin fakturasi topilmagan yoki omborda yetmagan - tannarx taxminiy.",
+              "  - \"Tovar kodi\" - dastur chekdagi sotuvni qaysi fakturadagi tovarga bog'lagani."]:
+        info.merge_cells(start_row=r, start_column=2, end_row=r, end_column=7)
+        info.cell(row=r, column=2, value=t).font = f_bold if t.endswith(":") else Font(size=10)
+        r += 1
+
+    # ------------------------------------------------ Xatolar (oddiy so'z bilan)
+    stats["issues"] = write_issues_sheet(wb, cx, years, S, owner_tin)
+
+    d = os.path.dirname(os.path.abspath(out_path))
+    if d and not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
+    wb.save(out_path)
+    wb.close()
+    return out_path, stats
