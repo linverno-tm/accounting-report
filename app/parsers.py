@@ -298,6 +298,8 @@ def parse_faktura_html(path):
         "lines": lines,
         "buyer_name": buyer,
         "buyer_tin": buyer_tin,
+        # Hisobot kimniki: fakturada - sotib oluvchi (bizning tashkilot)
+        "owner_tin": re.sub(r"\D", "", buyer_tin or "") or None,
     }
     return {"documents": [doc], "warnings": warnings}
 
@@ -407,6 +409,8 @@ def parse_checks_xlsx(path):
                 "contract_date": None,
                 "partner_name": None,
                 "partner_tin": tin,
+                # Chekda - sotuvchi (bizning tashkilot) STIRi
+                "owner_tin": re.sub(r"\D", "", tin) or None,
                 "pos_id": pos_id,
                 "check_type": str(r["check_type"] or "").strip(),
                 "is_return": 1 if is_ret else 0,

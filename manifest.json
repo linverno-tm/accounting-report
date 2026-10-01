@@ -1,24 +1,24 @@
 {
-  "version": "1.4.0",
-  "generated": "2026-10-01T10:09:28",
+  "version": "1.5.0",
+  "generated": "2026-10-01T15:24:43",
   "modules": [
     {
       "name": "bh_config",
       "path": "app/config.py",
-      "sha256": "ed58b8e4956b8ef0e5d1664d6443c3cec3dfd51da21899ac9826f9a885b40e16",
+      "sha256": "be69d8e0a41056374d976072bdf67f1f4087f4d34ea4b6d8ec55ad6d976edbdb",
       "bytes": 18743
     },
     {
       "name": "bh_db",
       "path": "app/db.py",
-      "sha256": "901f7ff4ae3247e056b3d155d5f0308528d6f02eba09bcb78b78224f98813438",
-      "bytes": 17718
+      "sha256": "f7944e9848a985b0852535843dbb1ef3d9f6eee8bf7afb6fb415c6389222f120",
+      "bytes": 20095
     },
     {
       "name": "bh_parsers",
       "path": "app/parsers.py",
-      "sha256": "a5b36fb485ae3cec6a28a0f0c6e22e9e7692e0b1f49124925bb549cd18e9cf3b",
-      "bytes": 28306
+      "sha256": "f2a00e83ff758851183d6cc6eaf1c2bba7665344767c062ffd7cc42ba12d202a",
+      "bytes": 28567
     },
     {
       "name": "bh_matching",
@@ -29,20 +29,20 @@
     {
       "name": "bh_fifo",
       "path": "app/fifo.py",
-      "sha256": "39f218365cd389c4c0016a5ac50690686699002d62519230b2271d64b87be5ab",
-      "bytes": 28781
+      "sha256": "8b83c80f8d7975052578342298862a049d6bbde032aeb20b1996ed83e48e9c18",
+      "bytes": 31492
     },
     {
       "name": "bh_report",
       "path": "app/report.py",
-      "sha256": "41b0b65006995225e179f9f12d77d2a92deac2e2d51aaa59969dc20a4a85030f",
-      "bytes": 19543
+      "sha256": "9c7df8011e4d8f35076fe882383a7e45b760b6cb0d9454feabe58bfc6ef1e6a0",
+      "bytes": 21715
     },
     {
       "name": "bh_ui",
       "path": "app/ui.py",
-      "sha256": "da687154afef7515a1d9e0cb711c2fa66111cbdbb94140cec98c2552c7bbb837",
-      "bytes": 93811
+      "sha256": "3f3399e596d88ac49a409b36be71be1be2e36c7affef704f84a9251c5518eaea",
+      "bytes": 97699
     }
   ]
 }

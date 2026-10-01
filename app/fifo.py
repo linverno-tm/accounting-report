@@ -25,6 +25,9 @@ import bh_matching as M
 
 ZERO = Decimal("0")
 
+# SQL: tashkilot (STIR) bo'yicha filtr; owner_tin=None - hammasi. Ikki marta uzatiladi.
+OWN = "(? IS NULL OR %s.owner_tin = ?)"
+
 
 # ===========================================================================
 # Import
@@ -95,6 +98,43 @@ def reparse_file(cx, engine, sf, path):
     return a, n, r["warnings"]
 
 
+def backfill_owners(cx, progress=None):
+    """
+    Eski bazadagi fakturalarga egasini (sotib oluvchi STIRi) yozadi - fayl asl
+    joyida tursa qayta o'qiladi. 1.5.0 gacha bu STIR saqlanmagan, shuning uchun
+    ikki do'kon fakturalari bitta hisobotga aralashib ketardi.
+    {"fixed": hujjat, "missing": topilmagan fayl} qaytaradi.
+    """
+    import bh_parsers as P
+
+    rows = cx.execute("""
+        SELECT DISTINCT sf.id, sf.full_path, sf.sha256, sf.filename
+        FROM source_file sf JOIN document d ON d.source_file_id = sf.id
+        WHERE d.kind = 'kirim' AND (d.owner_tin IS NULL OR d.owner_tin = '')""").fetchall()
+    fixed = missing = 0
+    for i, sf in enumerate(rows):
+        path = sf["full_path"] or ""
+        try:
+            ok = os.path.isfile(path) and DB.file_sha256(path) == sf["sha256"]
+        except OSError:
+            ok = False
+        if not ok:
+            missing += 1
+            continue
+        if progress:
+            progress(i, len(rows), "Tashkilotlar ajratilmoqda: %d / %d" % (i + 1, len(rows)))
+        for doc in P.parse_any(path, "kirim")["documents"]:
+            own = doc.get("owner_tin")
+            if not own:
+                continue
+            DB.save_org(cx, own, doc.get("buyer_name") or "")
+            cur = cx.execute(
+                "UPDATE document SET owner_tin=? WHERE doc_key=? "
+                "AND (owner_tin IS NULL OR owner_tin='')", (own, doc["doc_key"]))
+            fixed += cur.rowcount
+    return {"fixed": fixed, "missing": missing}
+
+
 def reparse_old_checks(cx, engine, progress=None):
     """
     Bazadagi barcha eski chek fayllarini (asl joyida turgan bo'lsa) qayta
@@ -130,10 +170,16 @@ def _import_docs(cx, engine, parsed, source_file_id, quiet_dups=False):
     added = skipped = nlines = 0
 
     for doc in parsed["documents"]:
-        ex = cx.execute("SELECT id FROM document WHERE doc_key=?",
+        owner = doc.get("owner_tin") or None
+        if owner:
+            DB.save_org(cx, owner, doc.get("buyer_name") if doc["kind"] == "kirim" else "")
+        ex = cx.execute("SELECT id, owner_tin FROM document WHERE doc_key=?",
                         (doc["doc_key"],)).fetchone()
         if ex:
             skipped += 1
+            if owner and not ex["owner_tin"]:
+                # eski bazadagi hujjatga egasi yoziladi (fayl qayta qo'shilganda)
+                cx.execute("UPDATE document SET owner_tin=? WHERE id=?", (owner, ex["id"]))
             if not quiet_dups:
                 DB.add_issue(cx, doc.get("doc_year"), C.SEVERITY_INFO, "duplicate_doc",
                              "Hujjat allaqachon kiritilgan: %s" % (doc.get("doc_no") or "?"),
@@ -143,14 +189,14 @@ def _import_docs(cx, engine, parsed, source_file_id, quiet_dups=False):
         cur = cx.execute(
             "INSERT INTO document(source_file_id,kind,doc_key,doc_no,doc_date,doc_year,"
             "contract_no,contract_date,partner_name,partner_tin,pos_id,check_type,"
-            "total_net,total_vat,total_gross,is_return) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "total_net,total_vat,total_gross,is_return,owner_tin) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (source_file_id, doc["kind"], doc["doc_key"], doc.get("doc_no"),
              doc.get("doc_date"), doc.get("doc_year"), doc.get("contract_no"),
              doc.get("contract_date"), doc.get("partner_name"), doc.get("partner_tin"),
              doc.get("pos_id"), doc.get("check_type"),
              str(doc.get("total_net") or 0), str(doc.get("total_vat") or 0),
-             str(doc.get("total_gross") or 0), int(doc.get("is_return") or 0)),
+             str(doc.get("total_gross") or 0), int(doc.get("is_return") or 0), owner),
         )
         did = cur.lastrowid
         added += 1
@@ -254,7 +300,8 @@ def _rebuild(cx, progress=None):
         SELECT l.id, l.kind, l.product_id, l.qty, l.unit_price_net,
                l.amount_net, l.amount_gross, l.raw_name, l.unit,
                COALESCE(l.line_date, d.doc_date) AS dt,
-               d.doc_year, d.doc_no, d.partner_tin, d.is_return
+               d.doc_year, d.doc_no, d.partner_tin, d.is_return,
+               COALESCE(d.owner_tin, '') AS owner
         FROM doc_line l JOIN document d ON d.id = l.document_id
         WHERE l.product_id IS NOT NULL
         ORDER BY COALESCE(l.line_date, d.doc_date) IS NULL,
@@ -310,7 +357,9 @@ def _rebuild(cx, progress=None):
             "qty_in,qty_left,unit_cost,markup,is_opening,source_year) "
             "VALUES(?,?,?,?,?,?,?,?,0,?)",
             (pid, r["id"], dt, year, str(q), str(q), str(cost), str(markup), year))
-        g = grp.get(pid, pid)
+        # Zaxira kaliti: (tashkilot, tovar guruhi) - bir do'kon sotuvi boshqasining
+        # kirimidan yechilmaydi
+        g = (r["owner"], grp.get(pid, pid))
         open_lots.setdefault(g, []).append([cur.lastrowid, q, cost, dt])
         last_cost[g] = cost
 
@@ -349,7 +398,7 @@ def _rebuild(cx, progress=None):
 
     for i, r in enumerate(sales):
         pid = r["product_id"]
-        g = grp.get(pid, pid)
+        g = (r["owner"], grp.get(pid, pid))
         q = DB.D(r["qty"])
         dt = r["dt"] or ""
         year = r["doc_year"]
@@ -432,7 +481,7 @@ def _rebuild(cx, progress=None):
 # ===========================================================================
 # Yil kesimi - hisobot uchun
 # ===========================================================================
-def year_rows(cx, year):
+def year_rows(cx, year, owner_tin=None):
     """
     Hisobotning "YYYY ТХ" varag'i uchun satrlar.
 
@@ -445,8 +494,11 @@ def year_rows(cx, year):
         kirim          = qty_in (agar partiya SHU yilda kelgan bo'lsa)
         chiqim         = shu yil ichida yechilgani
         oxiriga qoldiq = boshiga + kirim - chiqim
+
+    owner_tin berilsa - faqat shu tashkilot (STIR) hujjatlari.
     """
     y0 = "%d-01-01" % year
+    own = (owner_tin, owner_tin)
     y1 = "%d-12-31" % year
 
     lots = cx.execute("""
@@ -458,9 +510,10 @@ def year_rows(cx, year):
         FROM stock_lot s
         JOIN product p ON p.id = s.product_id
         LEFT JOIN doc_line l ON l.id = s.doc_line_id
-        WHERE s.lot_date <= ?
+        LEFT JOIN document dd ON dd.id = l.document_id
+        WHERE s.lot_date <= ? AND %s
         ORDER BY s.lot_date, s.id
-    """, (y1,)).fetchall()
+    """ % (OWN % "dd"), (y1,) + own).fetchall()
 
     # partiya -> (yil boshigacha yechilgan, shu yil yechilgan)
     before = {}
@@ -551,9 +604,10 @@ def year_rows(cx, year):
                        / NULLIF(CAST(l.qty AS REAL), 0)) g
             FROM allocation a JOIN product p ON p.id=a.product_id
             JOIN doc_line l ON l.id = a.sale_line_id
-            WHERE a.shortfall=1 AND a.alloc_date >= ? AND a.alloc_date <= ?
+            JOIN document dd ON dd.id = l.document_id
+            WHERE a.shortfall=1 AND a.alloc_date >= ? AND a.alloc_date <= ? AND %s
             GROUP BY a.product_id
-        """, (y0, y1)):
+        """ % (OWN % "dd"), (y0, y1) + own):
         q = DB.D(r["q"])
         cost = DB.D(r["c"])
         # sotuv summasi - chekdagi haqiqiy summa (taxminiy narxdan emas)
@@ -588,9 +642,9 @@ def year_rows(cx, year):
             FROM doc_line l JOIN document d ON d.id = l.document_id
             WHERE l.kind='chiqim' AND l.product_id IS NULL
               AND COALESCE(l.line_date, d.doc_date) >= ?
-              AND COALESCE(l.line_date, d.doc_date) <= ?
+              AND COALESCE(l.line_date, d.doc_date) <= ? AND %s
             GROUP BY l.norm_name, substr(COALESCE(l.line_date, d.doc_date), 1, 7)
-        """, (y0, y1 + "~")):
+        """ % (OWN % "d"), (y0, y1 + "~") + own):
         q = C.qty(DB.D(r["q"]))
         if q == 0:
             continue
@@ -631,7 +685,7 @@ def year_totals(rows):
 # ===========================================================================
 # Tekshiruv
 # ===========================================================================
-def validate_year(cx, year):
+def validate_year(cx, year, owner_tin=None):
     """Hisobot oldidan mantiqiy tekshiruvlar."""
     DB.clear_issues(cx, year=year, codes=["wrong_year", "bad_date", "unit_mismatch"])
 
@@ -661,9 +715,11 @@ def validate_year(cx, year):
 
     n = cx.execute(
         "SELECT COUNT(*) c FROM doc_line l JOIN document d ON d.id=l.document_id "
-        "WHERE l.kind='chiqim' AND l.product_id IS NULL AND d.doc_year=?",
-        (year,)).fetchone()["c"]
+        "WHERE l.kind='chiqim' AND l.product_id IS NULL AND d.doc_year=? AND " + OWN % "d",
+        (year, owner_tin, owner_tin)).fetchone()["c"]
     if n:
+        # detail = STIR: Xatolar varag'i shu tashkilotnikini ko'rsatadi
         DB.add_issue(cx, year, C.SEVERITY_ERROR, "unmatched_sale",
-                     "%d ta sotuv satri kirimga bog'lanmagan - tannarx aniqlanmaydi" % n)
+                     "%d ta sotuv satri kirimga bog'lanmagan - tannarx aniqlanmaydi" % n,
+                     detail=owner_tin)
     return DB.issue_counts(cx, year)

@@ -861,6 +861,30 @@ class App:
         # har safar qo'lda bosmasin.
         root.after(120, self._startup_scan)
         root.after(400, self._first_run_setup)
+        root.after(250, self._startup_split)
+
+    def _startup_split(self):
+        """
+        1.5.0 gacha fakturaning sotib oluvchi STIRi saqlanmagan - eski bazada ikki
+        do'kon aralash bo'lishi mumkin. Fayllar asl joyida tursa, qayta o'qib ajratiladi.
+        """
+        n = self.cx.execute(
+            "SELECT COUNT(*) FROM document WHERE kind='kirim' AND (owner_tin IS NULL OR owner_tin='') "
+            "AND source_file_id IS NOT NULL").fetchone()[0]
+        if not n or self.worker.busy:
+            return
+        if DB.get_setting(self.cx, "split_tried_v1") and not self.queued_files:
+            return
+
+        def job(cx, progress):
+            r = F.backfill_owners(cx, progress)
+            if r["fixed"]:
+                progress(0, 0, "ombor qayta hisoblanmoqda")
+                F.rebuild_stock(cx, progress)
+            DB.set_setting(cx, "split_tried_v1", True)
+            return r
+        self.set_status("Eski fakturalar tashkilotlarga ajratilmoqda...")
+        self._run("Ajratish", job)
 
     def _first_run_setup(self):
         """
@@ -945,9 +969,8 @@ class App:
     # -- 1-qoida: pastki panellar BIRINCHI pack qilinadi -----------------
     def _build(self):
         self._build_statusbar()     # 1-chi: eng past
-        self._build_actionbar()     # 2-chi: status ustida
-        self._build_header()        # 3-chi: tepa
-        self._build_notebook()      # 4-chi: qolgan joyni egallaydi
+        self._build_header()        # 2-chi: tepa
+        self._build_notebook()      # 3-chi: qolgan joyni egallaydi
 
     def _build_statusbar(self):
         bar = ttk.Frame(self.root)
@@ -968,42 +991,29 @@ class App:
                                     anchor="w")
         self.lbl_status.pack(side="left", fill="x", expand=True)
 
-    def _build_actionbar(self):
-        """
-        Pastki panel - har bo'limdan ko'rinib turadigan IKKITA asosiy amal.
-        "Import qilish" va "Qayta hisoblash" endi yo'q: fayl qo'shilishi bilan
-        o'zi qabul qilinadi, hisob-kitob hisobotdan oldin o'zi yangilanadi.
-        """
-        wrap = ttk.Frame(self.root)
-        wrap.pack(side="bottom", fill="x")
-        ttk.Separator(wrap, orient="horizontal").pack(fill="x")
-
-        bar = FlowBar(wrap, scale=self.scale)
-        bar.pack(fill="x", padx=8)
-        self.actionbar = bar
-
-        self.btn_add = ttk.Button(bar, text="+  Fayllarni qo'shish", style="BigGhost.TButton",
-                                  command=self.pick_files)
-        bar.add(self.btn_add, "left")
-        self.btn_report = ttk.Button(bar, text="Excel hisobotni yaratish",
-                                     style="Big.TButton", command=self.do_report)
-        bar.add(self.btn_report, "right")
-
     def _build_header(self):
+        """
+        Tepada bitta tugma: asosiy sahifada "Sozlamalar", boshqa sahifada "Asosiy sahifa".
+        Egasi: "tugmalar juda ko'payib ketibdi" (1.5.0) - qolgan hamma narsa Sozlamalar ichida.
+        """
         head = ttk.Frame(self.root)
-        head.pack(side="top", fill="x", padx=16, pady=(12, 4))
-        ttk.Label(head, text="Versiya %s" % C.VERSION, style="Muted.TLabel").pack(side="right", anchor="n")
+        head.pack(side="top", fill="x", padx=16, pady=(12, 6))
+        self.btn_nav = ttk.Button(head, text="Sozlamalar", style="Ghost.TButton",
+                                  command=self._nav_toggle)
+        self.btn_nav.pack(side="right", anchor="n")
         left = ttk.Frame(head)
         left.pack(side="left", fill="x", expand=True)
         ttk.Label(left, text="Buxgalteriya hisoboti", style="H1.TLabel").pack(anchor="w")
-        self.lbl_sub = ttk.Label(
-            left, style="Muted.TLabel",
-            text="Fakturalar va kassa cheklaridan \"KAMERAL TEKSHIRUVLAR\" Excel hisobotini tayyorlaydi")
+        self.lbl_sub = ttk.Label(left, style="Muted.TLabel", text="Versiya %s" % C.VERSION)
         self.lbl_sub.pack(anchor="w", pady=(2, 0))
 
     def _build_notebook(self):
-        self.nb = ttk.Notebook(self.root)
-        self.nb.pack(side="top", fill="both", expand=True, padx=10, pady=(4, 6))
+        # Yorliqlar yashirin: sahifalar faqat tugmalar orqali almashadi
+        st = ttk.Style(self.root)
+        st.layout("Pages.TNotebook.Tab", [])
+        st.configure("Pages.TNotebook", borderwidth=0, padding=0)
+        self.nb = ttk.Notebook(self.root, style="Pages.TNotebook")
+        self.nb.pack(side="top", fill="both", expand=True, padx=10, pady=(0, 6))
 
         self.tab_home = self._tab_home()
         self.tab_files = self.tab_home          # eski nom (testlar va yo'naltirishlar)
@@ -1012,17 +1022,28 @@ class App:
         self.tab_issues = self._tab_issues()
         self.tab_settings = self._tab_settings()
 
-        self.nb.add(self.tab_home, text="  Asosiy  ")
-        self.nb.add(self.tab_match, text="  Tovarni tanlash  ")
-        self.nb.add(self.tab_stock, text="  Ombor qoldig'i  ")
-        self.nb.add(self.tab_issues, text="  Kamchiliklar  ")
-        self.nb.add(self.tab_settings, text="  Sozlamalar  ")
+        self.nb.add(self.tab_home, text="Asosiy")
+        self.nb.add(self.tab_match, text="Tovarni tanlash")
+        self.nb.add(self.tab_stock, text="Ombor qoldig'i")
+        self.nb.add(self.tab_issues, text="Kamchiliklar")
+        self.nb.add(self.tab_settings, text="Sozlamalar")
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab)
+        # eski testlar uchun (pastki panel endi yo'q)
+        self.actionbar = None
+
+    def _nav_toggle(self):
+        if self._current_tab() == 0:
+            self.nb.select(self.tab_settings)
+        else:
+            self.nb.select(self.tab_home)
+
+    def _sync_nav(self):
+        self.btn_nav.configure(text="Sozlamalar" if self._current_tab() == 0 else "←  Asosiy sahifa")
 
     # ------------------------------------------------------------------
     # Asosiy: 3 qadam
     # ------------------------------------------------------------------
-    def _step(self, master, num, title, hint):
+    def _step(self, master, num, title, hint=None):
         outer, inner = card(master)
         outer.pack(fill="x", pady=(0, 12))
         head = ttk.Frame(inner, style="CardIn.TFrame")
@@ -1044,59 +1065,57 @@ class App:
         pad = ttk.Frame(page.body, padding=12)
         pad.pack(fill="both", expand=True)
 
-        # ---- 1-qadam -------------------------------------------------
+        # ---- 1-qadam: bitta tugma ------------------------------------
         b1 = self._step(pad, 1, "Fayllarni qo'shing",
-                        "Soliq saytidan olingan fakturalar (.xls) va kassa cheklari (checks-info .xlsx). "
-                        "Hammasini birdaniga tanlash mumkin. Qo'shilishi bilan o'zi qabul qilinadi. "
-                        "Bir fayl ikki marta qo'shilsa - bir marta hisoblanadi.")
+                        "Soliq saytidagi fakturalar va kassa cheklari. Hammasini birdaniga tanlang.")
         drop = ttk.Frame(b1, style="Drop.TFrame")
         drop.pack(fill="x")
         dz = ttk.Frame(drop, style="DropIn.TFrame")
         dz.pack(fill="x", padx=14, pady=14)
+        self.btn_pick = ttk.Button(dz, text="Fayllarni tanlash", style="Big.TButton",
+                                   command=self.pick_files)
+        self.btn_pick.pack()
         self.lbl_drop = ttk.Label(
-            dz, style="H2.TLabel", anchor="center", justify="center", background="#eef3fb",
-            text="Fayllarni shu yerga sudrab tashlang")
-        self.lbl_drop.pack(fill="x")
-        self.lbl_drop2 = ttk.Label(
             dz, style="CardMuted.TLabel", anchor="center", justify="center", background="#eef3fb",
-            text="yoki tugmani bosing:")
-        self.lbl_drop2.pack(fill="x", pady=(2, 10))
-        dbar = ttk.Frame(dz, style="DropIn.TFrame")
-        dbar.pack()
-        ttk.Button(dbar, text="Fayllarni tanlash", style="Big.TButton",
-                   command=self.pick_files).pack(side="left", padx=6)
-        ttk.Button(dbar, text="Papkani tanlash", style="BigGhost.TButton",
-                   command=self.pick_folder).pack(side="left", padx=6)
+            text="yoki fayllarni shu yerga sudrab tashlang")
+        self.lbl_drop.pack(fill="x", pady=(8, 0))
+        self.lbl_drop2 = self.lbl_drop
 
         self._dnd = None
         for w in (self.root, drop):
             b = enable_file_drop(w, self.on_files_dropped)
             self._dnd = self._dnd or b
         if not self._dnd:
-            self.lbl_drop.configure(text="Fayllarni tanlang")
-            self.lbl_drop2.configure(text="Bir nechtasini Ctrl tugmasini bosib turib tanlash mumkin:")
+            self.lbl_drop.configure(text="Bir nechtasini Ctrl tugmasini bosib turib tanlash mumkin")
 
         self.lbl_import = ttk.Label(b1, text="", style="Result.TLabel", justify="left",
                                     anchor="w")
-        self.lbl_import.pack(fill="x", pady=(10, 4))
-        self.lbl_queue = ttk.Label(b1, text="", style="CardMuted.TLabel")
-        self.lbl_queue.pack(anchor="w")
-        self.tbl_files = Table(b1, [
+        self.lbl_import.pack(fill="x", pady=(10, 0))
+        # Fayllar jadvali faqat navbat bo'lsa yoki o'qilmagan fayl bo'lsa ko'rinadi
+        self.files_box = ttk.Frame(b1, style="CardIn.TFrame")
+        self.lbl_queue = ttk.Label(self.files_box, text="", style="CardMuted.TLabel")
+        self.lbl_queue.pack(anchor="w", pady=(6, 2))
+        self.tbl_files = Table(self.files_box, [
             ("file", "Fayl", 380, True, "w"),
             ("kind", "Turi", 150, False, "w"),
             ("state", "Natija", 330, True, "w"),
-        ], scale=self.scale, height=6, on_double=self._toggle_kind)
+        ], scale=self.scale, height=5, on_double=self._toggle_kind)
         self.tbl_files.pack(fill="x")
         self._last_results = []
 
-        # ---- 2-qadam -------------------------------------------------
-        b2 = self._step(pad, 2, "Tekshiring: hamma oy bormi?",
-                        "Har oyda nechta faktura va chek borligi. Yashil - joyida, sariq - tovar tanlash kerak, "
-                        "qizil - fayl qo'shilmagan.")
-        yrow = ttk.Frame(b2, style="CardIn.TFrame")
-        yrow.pack(fill="x", pady=(0, 8))
-        ttk.Label(yrow, text="Yil:", style="Text.TLabel").pack(side="left", padx=(0, 8))
-        self.year_bar = ttk.Frame(yrow, style="CardIn.TFrame")
+        # ---- 2-qadam: oylar ------------------------------------------
+        b2 = self._step(pad, 2, "Tekshiring: hamma oy bormi?")
+        self.org_row = ttk.Frame(b2, style="CardIn.TFrame")
+        self.org_row.pack(fill="x", pady=(0, 6))
+        self.lbl_org = ttk.Label(self.org_row, text="", style="Result.TLabel", justify="left", anchor="w")
+        self.lbl_org.pack(anchor="w")
+        self.org_bar = ttk.Frame(self.org_row, style="CardIn.TFrame")
+        self.org_bar.pack(fill="x")
+        self.var_org = tk.StringVar(value=DB.get_setting(self.cx, "selected_org", "") or "")
+        self.year_row = ttk.Frame(b2, style="CardIn.TFrame")
+        self.year_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(self.year_row, text="Yil:", style="Text.TLabel").pack(side="left", padx=(0, 8))
+        self.year_bar = ttk.Frame(self.year_row, style="CardIn.TFrame")
         self.year_bar.pack(side="left")
         self.var_year = tk.IntVar(value=0)
         self.month_grid = ttk.Frame(b2, style="CardIn.TFrame")
@@ -1105,43 +1124,35 @@ class App:
         self.lbl_months.pack(fill="x", pady=(10, 0))
         self.lbl_tin_warn = ttk.Label(b2, text="", style="Err.TLabel", justify="left", anchor="w")
         self.lbl_tin_warn.pack(fill="x")
-        self.btn_go_match = ttk.Button(b2, text="Tovarni tanlash  →", style="BigGhost.TButton",
+        self.btn_go_match = ttk.Button(b2, text="Tovarni tanlash", style="BigGhost.TButton",
                                        command=lambda: self.nb.select(self.tab_match))
 
-        # ---- 3-qadam -------------------------------------------------
-        b3 = self._step(pad, 3, "Excel hisobotni oling",
-                        "Tugmani bossangiz hisobot tayyorlanadi, saqlanadi va o'zi ochiladi.")
+        # ---- 3-qadam: bitta tugma ------------------------------------
+        b3 = self._step(pad, 3, "Excel hisobotni oling")
         self.btn_report_big = ttk.Button(b3, text="Excel hisobotni yaratish", style="Green.TButton",
                                          command=self.do_report)
         self.btn_report_big.pack(anchor="w")
-        orow = ttk.Frame(b3, style="CardIn.TFrame")
-        orow.pack(fill="x", pady=(10, 0))
+        self.btn_report = self.btn_report_big
         self.var_outdir = tk.StringVar(
             value=DB.get_setting(self.cx, "out_dir",
                                  os.path.join(os.path.expanduser("~"), "Desktop")))
-        self.lbl_outdir = ttk.Label(orow, text="", style="CardMuted.TLabel")
-        self.lbl_outdir.pack(side="left")
-        ttk.Button(orow, text="Boshqa joy...", style="Ghost.TButton",
-                   command=self._browse_outdir).pack(side="left", padx=(10, 0))
+        self.lbl_outdir = ttk.Label(b3, text="", style="CardMuted.TLabel")
+        self.lbl_outdir.pack(anchor="w", pady=(8, 0))
         self._show_outdir()
         self.lbl_result = ttk.Label(b3, text="", style="Result.TLabel", justify="left", anchor="w")
         self.lbl_result.pack(fill="x", pady=(10, 0))
-        rrow = ttk.Frame(b3, style="CardIn.TFrame")
-        rrow.pack(fill="x", pady=(6, 0))
-        self.btn_open = ttk.Button(rrow, text="Hisobotni ochish", style="Ghost.TButton",
-                                   command=self._open_last, state="disabled")
-        self.btn_open.pack(side="left")
-        self.btn_open_dir = ttk.Button(
-            rrow, text="Papkasini ochish", style="Ghost.TButton", state="disabled",
-            command=lambda: self._open_path(os.path.dirname(self._last_report or "")))
-        self.btn_open_dir.pack(side="left", padx=(8, 0))
+        self.btn_open = ttk.Button(b3, text="Hisobotni ochish", style="Ghost.TButton",
+                                   command=self._open_last)
         return page
 
     def _show_outdir(self):
         d = self.var_outdir.get() or os.path.expanduser("~")
         base = os.path.basename(d.rstrip("\\/")).lower()
-        name = "Ish stoli" if base in ("desktop", "рабочий стол") else os.path.normpath(d)
-        self.lbl_outdir.configure(text="Saqlanadigan joy: %s" % name)
+        name = "Ish stoliga" if base in ("desktop", "рабочий стол") else "%s papkasiga" % os.path.normpath(d)
+        text = "Hisobot %s saqlanadi va o'zi ochiladi." % name
+        for lbl in (getattr(self, "lbl_outdir", None), getattr(self, "lbl_outdir2", None)):
+            if lbl is not None:
+                lbl.configure(text=text)
 
     # ------------------------------------------------------------------
     # Tovarni tanlash
@@ -1276,11 +1287,32 @@ class App:
         pad = ttk.Frame(page.body, padding=10)
         pad.pack(fill="both", expand=True)
 
+        cx_, ix_ = card(pad, "Qo'shimcha bo'limlar")
+        cx_.pack(fill="x")
+        nrow = FlowBar(ix_, scale=self.scale)
+        nrow.pack(fill="x")
+        nrow.add(ttk.Button(nrow, text="Ombor qoldig'i", style="Ghost.TButton",
+                            command=lambda: self.nb.select(self.tab_stock)), "left")
+        nrow.add(ttk.Button(nrow, text="Kamchiliklar ro'yxati", style="Ghost.TButton",
+                            command=lambda: self.nb.select(self.tab_issues)), "left")
+        nrow.add(ttk.Button(nrow, text="Tovarni tanlash", style="Ghost.TButton",
+                            command=lambda: self.nb.select(self.tab_match)), "left")
+        nrow.add(ttk.Button(nrow, text="Butun papkani qo'shish", style="Ghost.TButton",
+                            command=self.pick_folder), "left")
+
+        cs_, is_ = card(pad, "Hisobot qayerga saqlanadi")
+        cs_.pack(fill="x", pady=(10, 0))
+        self.lbl_outdir2 = ttk.Label(is_, text="", style="CardMuted.TLabel")
+        self.lbl_outdir2.pack(anchor="w")
+        ttk.Button(is_, text="Boshqa papkani tanlash", style="Ghost.TButton",
+                   command=self._browse_outdir).pack(anchor="w", pady=(8, 0))
+        self._show_outdir()
+
         c0, i0 = card(pad, "Hisobot sarlavhasi")
-        c0.pack(fill="x")
+        c0.pack(fill="x", pady=(10, 0))
         row = ttk.Frame(i0, style="CardIn.TFrame")
         row.pack(fill="x", pady=3)
-        ttk.Label(row, text="Tashkilot nomi", style="Card.TLabel", width=22).pack(side="left")
+        ttk.Label(row, text="Nomi (fakturada bo'lmasa)", style="Card.TLabel", width=22).pack(side="left")
         self.var_owner = tk.StringVar(value=DB.get_setting(self.cx, "owner_name", ""))
         ttk.Entry(row, textvariable=self.var_owner).pack(side="left", fill="x", expand=True)
 
@@ -1412,9 +1444,10 @@ class App:
 
     def refresh_counts(self):
         st = DB.stats(self.cx)
-        self.lbl_counts.configure(
-            text="Faktura: %d  ·  Chek: %d  ·  Tovar tanlash kerak: %d"
-                 % (st["docs_in"], st["docs_out"], st["unmatched"]))
+        # Umumiy sonlar ko'rsatilmaydi: bir nechta tashkilot bo'lsa chalg'itadi (1.5.0).
+        # Tashkilot bo'yicha sonlar 2-qadamdagi oylar jadvalida.
+        self.lbl_counts.configure(text="")
+        return st
 
     def _file_info(self, path, stt):
         """
@@ -1454,7 +1487,9 @@ class App:
                 state = "Fayl ochilmadi"
             rows.append((os.path.basename(p), self.KIND_WORD.get(kind, kind), state))
         if not rows:
-            rows = list(self._last_results)
+            # Natijadan faqat muammolilar ko'rsatiladi - hammasi joyida bo'lsa jadval yo'q
+            rows = [r for r in self._last_results
+                    if not r[2].startswith(("Qabul", "Oldin"))]
 
         def tag(r):
             st = r[2]
@@ -1468,11 +1503,13 @@ class App:
 
         self.tbl_files.fill(rows, tag)
         if self.queued_files:
-            self.lbl_queue.configure(text="%d ta fayl navbatda" % len(self.queued_files))
-        elif self._last_results:
-            self.lbl_queue.configure(text="Oxirgi qo'shilgan fayllar:")
+            self.lbl_queue.configure(text="%d ta fayl qabul qilinmoqda:" % len(self.queued_files))
         else:
-            self.lbl_queue.configure(text="")
+            self.lbl_queue.configure(text="Bu fayllar o'qilmadi:")
+        if rows:
+            self.files_box.pack(fill="x")
+        else:
+            self.files_box.pack_forget()
 
     def refresh_unmatched(self):
         self.engine.reload()
@@ -1485,6 +1522,7 @@ class App:
 
     def refresh_stock(self):
         show_zero = self.var_stock_zero.get()
+        tin = self.var_org.get() or None
         rows = self.cx.execute("""
             SELECT p.id, p.canon_name, p.unit,
                    COALESCE(SUM(CAST(s.qty_in AS REAL)), 0) inq,
@@ -1493,8 +1531,12 @@ class App:
                         THEN SUM(CAST(s.qty_in AS REAL) * CAST(s.unit_cost AS REAL))
                              / SUM(CAST(s.qty_in AS REAL))
                         ELSE 0 END avg_cost
-            FROM product p LEFT JOIN stock_lot s ON s.product_id = p.id
-            GROUP BY p.id ORDER BY p.canon_name""").fetchall()
+            FROM product p
+            JOIN stock_lot s ON s.product_id = p.id
+            LEFT JOIN doc_line sl ON sl.id = s.doc_line_id
+            LEFT JOIN document sd ON sd.id = sl.document_id
+            WHERE (? IS NULL OR sd.owner_tin = ?)
+            GROUP BY p.id ORDER BY p.canon_name""", (tin, tin)).fetchall()
         out = []
         for r in rows:
             left = r["leftq"] or 0
@@ -1534,8 +1576,28 @@ class App:
               "Sentabr", "Oktabr", "Noyabr", "Dekabr"]
 
     def refresh_home(self):
-        """2-qadam: yil tanlovi, 12 oy katakchasi, oddiy so'z bilan xulosa."""
-        years = DB.available_years(self.cx)
+        """2-qadam: tashkilot va yil tanlovi, 12 oy katakchasi, oddiy so'z bilan xulosa."""
+        orgs = DB.orgs(self.cx)
+        for w in self.org_bar.winfo_children():
+            w.destroy()
+        tins = [o["tin"] for o in orgs]
+        if self.var_org.get() not in tins:
+            self.var_org.set(tins[0] if tins else "")
+        if not orgs:
+            self.org_row.pack_forget()
+        else:
+            self.org_row.pack(fill="x", pady=(0, 6), before=self.month_grid)
+            if len(orgs) == 1:
+                o = orgs[0]
+                self.lbl_org.configure(text="Tashkilot: %s  (STIR %s)" % (o["name"] or "nomi noma'lum", o["tin"]))
+            else:
+                self.lbl_org.configure(text="Bazada %d ta tashkilot bor. Qaysi biri?" % len(orgs))
+                for o in orgs:
+                    label = "%s  (STIR %s)" % (o["name"] or "nomi noma'lum", o["tin"])
+                    ttk.Radiobutton(self.org_bar, text=label, value=o["tin"], variable=self.var_org,
+                                    command=self._on_org).pack(anchor="w")
+        tin = self.var_org.get() or None
+        years = DB.available_years(self.cx, tin)
         for w in self.year_bar.winfo_children():
             w.destroy()
         for w in self.month_grid.winfo_children():
@@ -1549,22 +1611,28 @@ class App:
             return
         if self.var_year.get() not in years:
             self.var_year.set(years[-1])
-        for y in years:
-            ttk.Radiobutton(self.year_bar, text=str(y), value=y, variable=self.var_year,
-                            command=self.refresh_home).pack(side="left", padx=(0, 14))
+        if len(years) > 1:
+            self.year_row.pack(fill="x", pady=(0, 8), before=self.month_grid)
+            for y in years:
+                ttk.Radiobutton(self.year_bar, text=str(y), value=y, variable=self.var_year,
+                                command=self.refresh_home).pack(side="left", padx=(0, 14))
+        else:
+            self.year_row.pack_forget()
         y = self.var_year.get()
 
         cnt = {}
         for r in self.cx.execute(
                 "SELECT kind, substr(doc_date,6,2) m, COUNT(*) n FROM document "
-                "WHERE doc_year=? AND doc_date IS NOT NULL GROUP BY kind, m", (y,)):
+                "WHERE doc_year=? AND doc_date IS NOT NULL AND (? IS NULL OR owner_tin=?) "
+                "GROUP BY kind, m", (y, tin, tin)):
             cnt[(r["kind"], r["m"])] = r["n"]
         unm, kas = {}, {}
         for r in self.cx.execute(
                 "SELECT substr(d.doc_date,6,2) m, SUM(l.product_id IS NULL) u, "
                 "SUM(CAST(l.amount_gross AS REAL)) g FROM doc_line l "
                 "JOIN document d ON d.id=l.document_id "
-                "WHERE l.kind='chiqim' AND d.doc_year=? GROUP BY m", (y,)):
+                "WHERE l.kind='chiqim' AND d.doc_year=? AND (? IS NULL OR d.owner_tin=?) "
+                "GROUP BY m", (y, tin, tin)):
             unm[r["m"]] = r["u"] or 0
             kas[r["m"]] = r["g"] or 0
 
@@ -1616,8 +1684,8 @@ class App:
             ng = self.cx.execute(
                 "SELECT COUNT(DISTINCT l.norm_name) FROM doc_line l "
                 "JOIN document d ON d.id=l.document_id "
-                "WHERE l.kind='chiqim' AND l.product_id IS NULL AND d.doc_year=?",
-                (y,)).fetchone()[0]
+                "WHERE l.kind='chiqim' AND l.product_id IS NULL AND d.doc_year=? "
+                "AND (? IS NULL OR d.owner_tin=?)", (y, tin, tin)).fetchone()[0]
             lines.append(
                 "%d xil tovarning fakturasi topilmadi (%d ta sotuv). Hisobot baribir chiqadi - "
                 "bu satrlar Excelda qizil bo'ladi. Tuzatish uchun fakturasini qo'shing yoki "
@@ -1627,18 +1695,21 @@ class App:
             lines.append("Hamma sotuv fakturadagi tovarga bog'langan.")
         self.lbl_months.configure(text="\n".join(lines), wraplength=int(900 * self.scale))
 
-        tins = [r[0] for r in self.cx.execute(
-            "SELECT DISTINCT partner_tin FROM document WHERE kind='chiqim' AND doc_year=? "
-            "AND partner_tin IS NOT NULL AND partner_tin<>''", (y,))]
-        if len(tins) > 1:
+        unk = DB.unknown_owner_count(self.cx)
+        if unk:
             self.lbl_tin_warn.configure(
                 wraplength=int(900 * self.scale),
-                text="Diqqat: bazada %d ta tashkilotning (STIR: %s) cheklari aralash. Hisobot "
-                     "bitta bo'lib chiqadi. Har tashkilot uchun alohida hisobot kerak bo'lsa - "
-                     "Sozlamalar > \"Hammasini o'chirish\" ni bosib, faqat bitta tashkilot "
-                     "fayllarini qo'shing." % (len(tins), ", ".join(tins)))
+                text="Diqqat: %d ta hujjat qaysi tashkilotniki ekani aniqlanmadi (fayli asl joyida "
+                     "topilmadi) - ular hisobotga kirmaydi. O'sha fakturalarni qaytadan qo'shing - "
+                     "dastur ularni o'zi ajratadi." % unk)
         else:
             self.lbl_tin_warn.configure(text="")
+
+    def _on_org(self):
+        DB.set_setting(self.cx, "selected_org", self.var_org.get())
+        self.var_year.set(0)
+        self._stale.update({2})
+        self.refresh_home()
 
     def _refresh_db_label(self):
         p = C.db_path()
@@ -1846,6 +1917,7 @@ class App:
                     why = (r["warnings"][0].split(": ", 1)[-1] if r["warnings"] else
                            "ichida hujjat topilmadi")
                     results.append((name, word.get(kind, kind), "O'qilmadi: %s" % why))
+            F.backfill_owners(cx, progress)
             old = F.reparse_old_checks(cx, eng, progress)
             docs += old["docs"]
             lines += old["lines"]
@@ -1876,7 +1948,10 @@ class App:
         self._run("Qayta hisoblash", job)
 
     def do_report(self):
-        years = DB.available_years(self.cx)
+        if self._current_tab() != 0 or not self.var_org.get():
+            self.refresh_home()          # tashkilot tanlovi yangi bo'lsin
+        tin = self.var_org.get() or None
+        years = DB.available_years(self.cx, tin)
         if not years:
             messagebox.showwarning(
                 "Ma'lumot yo'q",
@@ -1887,14 +1962,14 @@ class App:
         outdir = self.var_outdir.get().strip() or os.path.expanduser("~")
         if not os.path.isdir(outdir):
             outdir = os.path.expanduser("~")
-        owner = self.var_owner.get().strip() or "Ташкилот"
-        DB.set_setting(self.cx, "owner_name", owner)
+        owner = (DB.org_name(self.cx, tin) if tin else "") or self.var_owner.get().strip() or "Ташкилот"
         DB.set_setting(self.cx, "out_dir", outdir)
+        DB.set_setting(self.cx, "owner_name", self.var_owner.get().strip())
 
         # Saqlash oynasi so'ralmaydi: buxgalter fayl nomi va papka bilan
         # ovora bo'lmasin. Bir xil nomli fayl bo'lsa (yoki Excelda ochiq
         # bo'lsa) - yoniga (2), (3) qo'shiladi.
-        base = R.default_filename(years)
+        base = R.default_filename(years, owner if tin and len(DB.orgs(self.cx)) > 1 else None)
         stem, ext = os.path.splitext(base)
         path = os.path.join(outdir, base)
         n = 2
@@ -1905,10 +1980,10 @@ class App:
         self.lbl_result.configure(text="Tayyorlanmoqda... biroz kuting.")
 
         def job(cx, progress):
-            DB.set_setting(cx, "owner_name", owner)
-            p, st = R.generate(cx, path, years=years, owner_name=owner,
+            p, st = R.generate(cx, path, years=years, owner_name=owner, owner_tin=tin,
                                progress=lambda a, b, m: progress(a, b, m))
-            return {"path": p, "stats": st}
+            return {"path": p, "stats": st,
+                    "org": ("%s (STIR %s)" % (owner, tin)) if tin else ""}
 
         self._run("Hisobot", job)
 
@@ -2015,6 +2090,7 @@ class App:
             tab = self.nb.index(self.nb.select())
         except tk.TclError:
             return
+        self._sync_nav()
         if self._recalc_if_dirty():
             return
         if tab in self._stale:
@@ -2093,7 +2169,7 @@ class App:
 
     def _set_busy(self, busy):
         st = "disabled" if busy else "normal"
-        for b in (self.btn_add, self.btn_report, self.btn_report_big, self.btn_recalc):
+        for b in (self.btn_pick, self.btn_report_big, self.btn_recalc):
             try:
                 b.configure(state=st)
             except tk.TclError:
@@ -2137,15 +2213,20 @@ class App:
                                       wraplength=int(900 * self.scale))
             self.set_status("Fayllar qabul qilindi")
             self.nb.select(self.tab_home)
+        elif label == "Ajratish":
+            self.set_status("Tashkilotlar ajratildi: %d ta faktura%s"
+                            % (res["fixed"], ("; %d ta fayl topilmadi" % res["missing"])
+                               if res["missing"] else ""))
         elif label == "Qayta hisoblash":
             self.set_status("Qayta hisoblandi: %d bog'landi, %d qoldi"
                             % (res["auto"], res["left"]))
         elif label == "Hisobot":
             p, st = os.path.normpath(res["path"]), res["stats"]
             self._last_report = p
-            self.btn_open.configure(state="normal")
-            self.btn_open_dir.configure(state="normal")
+            self.btn_open.pack(anchor="w", pady=(8, 0))
             lines = ["Tayyor! Hisobot saqlandi:", p, ""]
+            if res.get("org"):
+                lines.insert(0, "Tashkilot: %s" % res["org"])
             for y, t in sorted(st["years"].items()):
                 lines.append("%d yil:  kirim %s  ·  sotilgan (tannarx) %s  ·  qoldiq %s so'm"
                              % (y, fmt_money(t["in_sum"]).rsplit(".", 1)[0],

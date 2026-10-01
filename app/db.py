@@ -228,6 +228,29 @@ def _m1(cx):
     """)
 
 
+@migration(2)
+def _m2(cx):
+    """
+    Har STIR alohida (1.5.0). Ilgari ikki do'kon fayllari bitta bazaga qo'shilsa,
+    hisobot ikkalasini aralashtirib yuborardi (kirim = ikki do'kon yig'indisi) va
+    FIFO bir do'kon sotuvini boshqasining kirimidan yechardi.
+
+    document.owner_tin - hujjat kimniki: fakturada sotib oluvchi, chekda sotuvchi.
+    Cheklar uchun darrov to'ldiriladi (partner_tin); fakturalar uchun - fayl qayta
+    o'qilib (bh_fifo.backfill_owners), chunki sotib oluvchi STIRi ilgari saqlanmagan.
+    """
+    run_script(cx, """
+    ALTER TABLE document ADD COLUMN owner_tin TEXT;
+    CREATE INDEX IF NOT EXISTS ix_doc_owner ON document(owner_tin, kind, doc_year);
+    CREATE TABLE IF NOT EXISTS org (
+        tin   TEXT PRIMARY KEY,
+        name  TEXT NOT NULL DEFAULT ''
+    );
+    UPDATE document SET owner_tin = partner_tin
+     WHERE kind = 'chiqim' AND partner_tin IS NOT NULL AND partner_tin <> ''
+    """)
+
+
 SCHEMA_LATEST = max(MIGRATIONS)
 
 
@@ -478,11 +501,48 @@ def issue_counts(cx, year=None):
 # ---------------------------------------------------------------------------
 # Umumiy statistika
 # ---------------------------------------------------------------------------
-def available_years(cx):
-    rows = cx.execute(
-        "SELECT DISTINCT doc_year y FROM document WHERE doc_year IS NOT NULL "
-        "ORDER BY y").fetchall()
+def available_years(cx, owner_tin=None):
+    if owner_tin:
+        rows = cx.execute(
+            "SELECT DISTINCT doc_year y FROM document WHERE doc_year IS NOT NULL "
+            "AND owner_tin=? ORDER BY y", (owner_tin,)).fetchall()
+    else:
+        rows = cx.execute(
+            "SELECT DISTINCT doc_year y FROM document WHERE doc_year IS NOT NULL "
+            "ORDER BY y").fetchall()
     return [r["y"] for r in rows]
+
+
+def save_org(cx, tin, name=""):
+    """Tashkilot (STIR) - nomi bo'sh bo'lsa keyin kelgan nom yoziladi."""
+    if not tin:
+        return
+    cx.execute(
+        "INSERT INTO org(tin, name) VALUES(?, ?) ON CONFLICT(tin) DO UPDATE SET "
+        "name = CASE WHEN org.name = '' THEN excluded.name ELSE org.name END",
+        (tin, (name or "").strip()))
+
+
+def orgs(cx):
+    """Bazadagi tashkilotlar: faktura/chek soni bilan, ko'pi oldin."""
+    rows = cx.execute("""
+        SELECT d.owner_tin tin, COALESCE(o.name, '') name,
+               SUM(d.kind='kirim') kirim, SUM(d.kind='chiqim') chiqim
+        FROM document d LEFT JOIN org o ON o.tin = d.owner_tin
+        WHERE d.owner_tin IS NOT NULL AND d.owner_tin <> ''
+        GROUP BY d.owner_tin ORDER BY COUNT(*) DESC""").fetchall()
+    return [dict(r) for r in rows]
+
+
+def org_name(cx, tin):
+    r = cx.execute("SELECT name FROM org WHERE tin=?", (tin,)).fetchone()
+    return (r["name"] if r else "") or ""
+
+
+def unknown_owner_count(cx):
+    """Qaysi tashkilotniki ekani noma'lum hujjatlar (eski faktura, fayli topilmagan)."""
+    r = cx.execute("SELECT COUNT(*) FROM document WHERE owner_tin IS NULL OR owner_tin=''").fetchone()
+    return r[0] if r else 0
 
 
 def stats(cx):

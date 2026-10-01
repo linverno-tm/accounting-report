@@ -13,6 +13,7 @@ yozish kutubxonalari tashlab yuborilgan. .xlsx Excel'da bir xil ochiladi.
 """
 
 import os
+import re
 import datetime
 from decimal import Decimal
 
@@ -124,11 +125,11 @@ def _f(v):
 # ===========================================================================
 # ТХ varag'i
 # ===========================================================================
-def write_tx_sheet(wb, cx, year, owner_name, S):
+def write_tx_sheet(wb, cx, year, owner_name, S, owner_tin=None):
     from openpyxl.utils import get_column_letter
 
     ws = wb.create_sheet("%d ТХ" % year)
-    rows = F.year_rows(cx, year)
+    rows = F.year_rows(cx, year, owner_tin)
     tot = F.year_totals(rows)
     ncol = len(C.TX_COLUMNS)
 
@@ -248,7 +249,7 @@ def write_tx_sheet(wb, cx, year, owner_name, S):
 # ===========================================================================
 # Kassa varag'i
 # ===========================================================================
-def write_kassa_sheet(wb, cx, year, S, progress=None):
+def write_kassa_sheet(wb, cx, year, S, progress=None, owner_tin=None):
     from openpyxl.utils import get_column_letter
 
     ws = wb.create_sheet("касса %d" % year)
@@ -280,8 +281,8 @@ def write_kassa_sheet(wb, cx, year, S, progress=None):
             SELECT l.*, d.doc_no, d.doc_date, d.pos_id, d.partner_tin, d.check_type,
                    d.total_gross, d.total_vat, d.is_return
             FROM doc_line l JOIN document d ON d.id=l.document_id
-            WHERE l.kind='chiqim' AND d.doc_year=?
-            ORDER BY d.doc_date, d.doc_no, l.line_no""", (year,)):
+            WHERE l.kind='chiqim' AND d.doc_year=? AND (? IS NULL OR d.owner_tin = ?)
+            ORDER BY d.doc_date, d.doc_no, l.line_no""", (year, owner_tin, owner_tin)):
         cash = DB.D(0)
         card = DB.D(d["total_gross"])
         vals = [
@@ -310,7 +311,7 @@ def write_kassa_sheet(wb, cx, year, S, progress=None):
 # ===========================================================================
 # Xatolar varag'i (YANGI)
 # ===========================================================================
-def write_issues_sheet(wb, cx, years, S):
+def write_issues_sheet(wb, cx, years, S, owner_tin=None):
     from openpyxl.utils import get_column_letter
 
     ws = wb.create_sheet("Xatolar")
@@ -322,13 +323,19 @@ def write_issues_sheet(wb, cx, years, S):
     ws.row_dimensions[1].height = 22
 
     r = 2
-    q = "SELECT * FROM issue WHERE resolved=0"
-    args = []
+    # Tashkilot tanlangan bo'lsa - faqat uning hujjatlariga oid yozuvlar
+    q = ("SELECT i.* FROM issue i "
+         "LEFT JOIN doc_line il ON i.ref_table = 'doc_line' AND il.id = i.ref_id "
+         "LEFT JOIN document idoc ON idoc.id = CASE WHEN i.ref_table = 'document' "
+         "     THEN i.ref_id ELSE il.document_id END "
+         "WHERE i.resolved=0 AND (? IS NULL OR idoc.owner_tin = ? OR "
+         "     (idoc.id IS NULL AND (i.code <> 'unmatched_sale' OR i.detail = ?)))")
+    args = [owner_tin, owner_tin, owner_tin]
     if years:
-        q += " AND (year IS NULL OR year IN (%s))" % ",".join("?" * len(years))
-        args = list(years)
-    q += (" ORDER BY CASE severity WHEN 'xato' THEN 0 WHEN 'ogohlantirish' "
-          "THEN 1 ELSE 2 END, year, code")
+        q += " AND (i.year IS NULL OR i.year IN (%s))" % ",".join("?" * len(years))
+        args += list(years)
+    q += (" ORDER BY CASE i.severity WHEN 'xato' THEN 0 WHEN 'ogohlantirish' "
+          "THEN 1 ELSE 2 END, i.year, i.code")
     n = 0
     iss_plain = S.name("cell")
     iss_warn = S.name("cell", None, "warn")
@@ -357,7 +364,7 @@ def write_issues_sheet(wb, cx, years, S):
 # ===========================================================================
 # Ma'lumot varag'i (YANGI)
 # ===========================================================================
-def write_info_sheet(wb, cx, years, S, totals_by_year):
+def write_info_sheet(wb, cx, years, S, totals_by_year, owner_tin=None):
     from openpyxl.utils import get_column_letter
 
     ws = wb.create_sheet("Ma'lumot", 0)
@@ -373,7 +380,23 @@ def write_info_sheet(wb, cx, years, S, totals_by_year):
     r += 2
 
     st = DB.stats(cx)
+    if owner_tin:
+        # Sonlar shu tashkilot bo'yicha
+        def one(sql):
+            return cx.execute(sql, (owner_tin,)).fetchone()[0]
+        st.update({
+            "files": one("SELECT COUNT(DISTINCT source_file_id) FROM document WHERE owner_tin=?"),
+            "docs_in": one("SELECT COUNT(*) FROM document WHERE kind='kirim' AND owner_tin=?"),
+            "docs_out": one("SELECT COUNT(*) FROM document WHERE kind='chiqim' AND owner_tin=?"),
+            "lines_in": one("SELECT COUNT(*) FROM doc_line l JOIN document d ON d.id=l.document_id "
+                            "WHERE l.kind='kirim' AND d.owner_tin=?"),
+            "lines_out": one("SELECT COUNT(*) FROM doc_line l JOIN document d ON d.id=l.document_id "
+                             "WHERE l.kind='chiqim' AND d.owner_tin=?"),
+            "unmatched": one("SELECT COUNT(*) FROM doc_line l JOIN document d ON d.id=l.document_id "
+                             "WHERE l.product_id IS NULL AND d.owner_tin=?"),
+        })
     info = [
+        ("Tashkilot STIRi", owner_tin or "hammasi"),
         ("Yaratilgan sana", datetime.datetime.now().strftime("%d.%m.%Y %H:%M")),
         ("Dastur versiyasi", C.VERSION),
         ("QQS stavkasi", "%s%%" % (C.VAT_RATE * 100)),
@@ -430,18 +453,21 @@ def write_info_sheet(wb, cx, years, S, totals_by_year):
 # ===========================================================================
 # Asosiy
 # ===========================================================================
-def generate(cx, out_path, years=None, owner_name=None, progress=None):
+def generate(cx, out_path, years=None, owner_name=None, progress=None, owner_tin=None):
     """
     Hisobotni yozadi. (yo'l, statistika) qaytaradi.
+
+    owner_tin - qaysi tashkilot (STIR) hisoboti. Berilmasa - hammasi (eski xulq).
     """
     import openpyxl
 
-    years = years or DB.available_years(cx)
+    years = years or DB.available_years(cx, owner_tin)
     years = sorted(y for y in years if y)
     if not years:
         raise ValueError("Hisobot uchun ma'lumot yo'q - avval fayllarni import qiling.")
 
-    owner_name = owner_name or DB.get_setting(cx, "owner_name", "Ташкилот")
+    owner_name = owner_name or (DB.org_name(cx, owner_tin) if owner_tin else "") \
+        or DB.get_setting(cx, "owner_name", "Ташкилот")
 
     # Hisobotdan oldin ombor majburan qayta hisoblanadi: qolda
     # boglangan sotuvlar ham qoldiqdan ayrilsin (Qayta hisoblash
@@ -455,6 +481,7 @@ def generate(cx, out_path, years=None, owner_name=None, progress=None):
         F.reparse_old_checks(cx, _eng)
         _eng.reload()
         _M.auto_match_all(cx, _eng)
+        F.backfill_owners(cx)
     except Exception:
         pass
     F.rebuild_stock(cx)
@@ -469,18 +496,18 @@ def generate(cx, out_path, years=None, owner_name=None, progress=None):
     step = 0
 
     for y in years:
-        F.validate_year(cx, y)
+        F.validate_year(cx, y, owner_tin)
         n = write_kassa_sheet(
             wb, cx, y, S,
             progress=(lambda k, _y=y, _s=step: progress(_s, steps, "касса %d (%d satr)" % (_y, k)))
-            if progress else None)
+            if progress else None, owner_tin=owner_tin)
         stats["kassa_rows"] += n
         step += 1
         if progress:
             progress(step, steps, "касса %d" % y)
 
     for y in years:
-        nrows, tot = write_tx_sheet(wb, cx, y, owner_name, S)
+        nrows, tot = write_tx_sheet(wb, cx, y, owner_name, S, owner_tin)
         stats["tx_rows"] += nrows
         stats["years"][y] = tot
         totals_by_year[y] = tot
@@ -488,13 +515,13 @@ def generate(cx, out_path, years=None, owner_name=None, progress=None):
         if progress:
             progress(step, steps, "%d ТХ" % y)
 
-    n_iss = write_issues_sheet(wb, cx, years, S)
+    n_iss = write_issues_sheet(wb, cx, years, S, owner_tin)
     stats["issues"] = n_iss
     step += 1
     if progress:
         progress(step, steps, "Xatolar")
 
-    write_info_sheet(wb, cx, years, S, totals_by_year)
+    write_info_sheet(wb, cx, years, S, totals_by_year, owner_tin)
     step += 1
     if progress:
         progress(step, steps, "Ma'lumot")
@@ -507,7 +534,7 @@ def generate(cx, out_path, years=None, owner_name=None, progress=None):
     return out_path, stats
 
 
-def default_filename(years):
+def default_filename(years, owner_name=None):
     ys = sorted(y for y in (years or []) if y)
     if not ys:
         rng = "hisobot"
@@ -515,4 +542,8 @@ def default_filename(years):
         rng = "%d" % ys[0]
     else:
         rng = "%d-%d" % (ys[0], ys[-1])
-    return "КАМЕРАЛ ТЕКШИРУВЛАР %s.xlsx" % rng
+    tail = ""
+    if owner_name:
+        # fayl nomiga tashkilotning birinchi ikki so'zi (Windows taqiqlagan belgilarsiz)
+        tail = " " + " ".join(re.sub(r'[\\/:*?"<>|]+', " ", owner_name).split()[:2])
+    return "КАМЕРАЛ ТЕКШИРУВЛАР %s%s.xlsx" % (rng, tail)

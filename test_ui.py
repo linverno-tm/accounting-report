@@ -32,24 +32,17 @@ def probe(w, h, label):
     root.update_idletasks(); root.update()
     for _ in range(4):
         root.update_idletasks(); root.update()
-    ab = app.actionbar
+    # 1.5.0: pastki tugmalar paneli yo'q - holat qatori va sahifa sig'ishi tekshiriladi
     h = root.winfo_height()          # HAQIQIY balandlik (minsize bilan cheklangan)
     w = root.winfo_width()
-    bar_y = ab.winfo_rooty() - root.winfo_rooty()
-    bar_h = ab.winfo_height()
     st_y  = app.lbl_status.winfo_rooty() - root.winfo_rooty()
     nb_h  = app.nb.winfo_height()
-    # tugmalar joylashuvi
-    btns = ab._left + ab._right
-    maxx = max((b.winfo_x() + b.winfo_width()) for b in btns)
-    rows = len(set(b.winfo_y() for b in btns))
-    ok_bar   = (bar_y + bar_h) <= h + 2
+    nav_x = app.btn_nav.winfo_rootx() - root.winfo_rootx() + app.btn_nav.winfo_width()
+    ok_bar   = nb_h > 100
     ok_stat  = (st_y + app.lbl_status.winfo_height()) <= h + 2
-    ok_width = maxx <= ab.winfo_width() + 2
-    print('  %-22s oyna=%dx%d  panel_y=%-4d balandlik=%-3d qator=%d  '
-          'eng_o\'ng=%-4d(panel %d)  notebook_h=%-4d  %s'
-          % (label, w, h, bar_y, bar_h, rows, maxx, ab.winfo_width(), nb_h,
-             'OK' if (ok_bar and ok_stat and ok_width) else 'XATO'))
+    ok_width = nav_x <= w + 2
+    print('  %-22s oyna=%dx%d  holat_y=%-4d  sahifa_h=%-4d  sozlamalar_x=%-4d  %s'
+          % (label, w, h, st_y, nb_h, nav_x, 'OK' if (ok_bar and ok_stat and ok_width) else 'XATO'))
     return ok_bar and ok_stat and ok_width
 
 print()
