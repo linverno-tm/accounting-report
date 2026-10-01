@@ -153,7 +153,8 @@ def setup_style(root, scale):
     # Katta tugmalar: asosiy amallar (fayl qo'shish, hisobot)
     bigpad = (int(22 * scale), int(12 * scale))
     style.configure("Big.TButton", font=("Segoe UI", base + 2, "bold"), padding=bigpad,
-                    background=PALETTE["accent"], foreground="#ffffff", borderwidth=0)
+                    background=PALETTE["accent"], foreground="#ffffff", borderwidth=0,
+                    justify="center")
     style.map("Big.TButton", background=[("active", PALETTE["accent_dark"]),
                                          ("disabled", "#9fb8e8")])
     style.configure("BigGhost.TButton", font=("Segoe UI", base + 2), padding=bigpad)
@@ -1067,17 +1068,24 @@ class App:
 
         # ---- 1-qadam: bitta tugma ------------------------------------
         b1 = self._step(pad, 1, "Fayllarni qo'shing",
-                        "Soliq saytidagi fakturalar va kassa cheklari. Hammasini birdaniga tanlang.")
+                        "Kirimni va chiqimni alohida qo'shing: tugmani bosing va fayllarni yoki "
+                        "butun papkani tanlang.")
         drop = ttk.Frame(b1, style="Drop.TFrame")
         drop.pack(fill="x")
         dz = ttk.Frame(drop, style="DropIn.TFrame")
         dz.pack(fill="x", padx=14, pady=14)
-        self.btn_pick = ttk.Button(dz, text="Fayllarni tanlash", style="Big.TButton",
-                                   command=self.pick_files)
-        self.btn_pick.pack()
+        brow = ttk.Frame(dz, style="DropIn.TFrame")
+        brow.pack()
+        self.btn_pick_in = ttk.Button(brow, text="Kirim fayllari\n(fakturalar)", style="Big.TButton")
+        self.btn_pick_in.configure(command=lambda: self._pick_menu("kirim", self.btn_pick_in))
+        self.btn_pick_in.pack(side="left", padx=8)
+        self.btn_pick_out = ttk.Button(brow, text="Chiqim fayllari\n(kassa cheklari)", style="Big.TButton")
+        self.btn_pick_out.configure(command=lambda: self._pick_menu("chiqim", self.btn_pick_out))
+        self.btn_pick_out.pack(side="left", padx=8)
+        self.btn_pick = self.btn_pick_in
         self.lbl_drop = ttk.Label(
             dz, style="CardMuted.TLabel", anchor="center", justify="center", background="#eef3fb",
-            text="yoki fayllarni shu yerga sudrab tashlang")
+            text="yoki fayllarni (papkalarni ham) shu yerga sudrab tashlang")
         self.lbl_drop.pack(fill="x", pady=(8, 0))
         self.lbl_drop2 = self.lbl_drop
 
@@ -1604,8 +1612,7 @@ class App:
             w.destroy()
         self.btn_go_match.pack_forget()
         if not years:
-            ttk.Label(self.year_bar, text="hali fayl qo'shilmagan",
-                      style="CardMuted.TLabel").pack(side="left")
+            self.year_row.pack_forget()
             self.lbl_months.configure(text="Avval 1-qadamda fayllarni qo'shing.")
             self.lbl_tin_warn.configure(text="")
             return
@@ -1737,25 +1744,57 @@ class App:
             DB.set_setting(self.cx, "out_dir", d)
             self._show_outdir()
 
-    def pick_folder(self):
-        d = filedialog.askdirectory(title="Fayllar papkasini tanlang", mustexist=True)
+    def pick_folder(self, kind=None):
+        """Butun papka - ichidagi (ichki papkalari bilan) hamma faktura va chek."""
+        title = {"kirim": "KIRIM papkasini tanlang (fakturalar)",
+                 "chiqim": "CHIQIM papkasini tanlang (kassa cheklari)"}.get(kind, "Papkani tanlang")
+        last = DB.get_setting(self.cx, "last_dir_%s" % (kind or "any"), "") or ""
+        d = filedialog.askdirectory(title=title, mustexist=True,
+                                    initialdir=last if os.path.isdir(last) else None)
         if d:
-            self._accept([d], source="papka")
+            DB.set_setting(self.cx, "last_dir_%s" % (kind or "any"), os.path.dirname(d))
+            self._accept([d], source="papka", kind=kind)
 
-    def pick_files(self):
-        """Bitta fayl ham, o'nlab fayl ham - Ctrl/Shift bilan ko'p tanlash."""
-        fs = filedialog.askopenfilenames(
-            title="Excel fayllarini tanlang (bir nechtasini Ctrl bilan)",
-            filetypes=[("Excel / faktura", "*.xls *.xlsx *.xlsm *.htm *.html"),
-                       ("Barcha fayllar", "*.*")])
+    def _pick_menu(self, kind, btn):
+        """
+        Tugma ostida ikki tanlov: fayllar yoki butun papka. Windows tanlash oynasi bir
+        vaqtda faqat fayl YOKI faqat papka beradi; sudrab tashlashda esa aralash ham bo'ladi.
+        """
+        m = tk.Menu(self.root, tearoff=0, font=("Segoe UI", self.fonts["base"][1] + 1))
+        m.add_command(label="  Fayllarni tanlash  ", command=lambda: self.pick_files(kind))
+        m.add_command(label="  Papkani tanlash (ichidagi hammasi)  ",
+                      command=lambda: self.pick_folder(kind))
+        try:
+            m.tk_popup(btn.winfo_rootx(), btn.winfo_rooty() + btn.winfo_height())
+        finally:
+            m.grab_release()
+
+    def pick_files(self, kind=None):
+        """
+        Kirim (fakturalar) yoki chiqim (kassa cheklari) fayllari - alohida tugma bilan.
+        Ko'p tanlash: Ctrl/Shift, hammasi - Ctrl+A.
+        """
+        if kind == "kirim":
+            title = "KIRIM fayllarini tanlang - fakturalar (hammasi: Ctrl+A)"
+            types = [("Fakturalar", "*.xls *.htm *.html"), ("Barcha fayllar", "*.*")]
+        elif kind == "chiqim":
+            title = "CHIQIM fayllarini tanlang - kassa cheklari (hammasi: Ctrl+A)"
+            types = [("Kassa cheklari", "*.xlsx *.xlsm"), ("Barcha fayllar", "*.*")]
+        else:
+            title = "Fayllarni tanlang (hammasi: Ctrl+A)"
+            types = [("Excel / faktura", "*.xls *.xlsx *.xlsm *.htm *.html"), ("Barcha fayllar", "*.*")]
+        last = DB.get_setting(self.cx, "last_dir_%s" % (kind or "any"), "") or ""
+        fs = filedialog.askopenfilenames(title=title, filetypes=types,
+                                         initialdir=last if os.path.isdir(last) else None)
         if fs:
-            self._accept(list(fs), source="tanlov")
+            DB.set_setting(self.cx, "last_dir_%s" % (kind or "any"), os.path.dirname(fs[0]))
+            self._accept(list(fs), source="tanlov", kind=kind)
 
     def on_files_dropped(self, paths):
         """Explorer'dan sudrab tashlanganda."""
         self._accept(paths, source="tashlandi")
 
-    def _accept(self, paths, source=""):
+    def _accept(self, paths, source="", kind=None):
         """
         Kiruvchi yo'llarni navbatga qo'shadi.
 
@@ -1771,12 +1810,21 @@ class App:
                 % ", ".join(P.SUPPORTED_EXT))
             return
         before = len(self.queued_files)
+        fixed = 0
         for f in files:
-            self._queue(f, P.guess_kind(f))
+            k = P.guess_kind(f)
+            if kind and k != kind and k in ("kirim", "chiqim"):
+                # noto'g'ri tugma orqali tanlangan (masalan chek "Kirim" bilan) -
+                # mazmuniga qarab o'zi to'g'rilanadi
+                fixed += 1
+            self._queue(f, k)
         added = len(self.queued_files) - before
         self.nb.select(self.tab_home)
         self.refresh_queue()
-        self.set_status("%d ta fayl qo'shildi - qabul qilinmoqda..." % added)
+        what = {"kirim": "kirim (faktura)", "chiqim": "chiqim (chek)"}.get(kind, "")
+        self.set_status("%d ta %s fayl qo'shildi - qabul qilinmoqda...%s"
+                        % (added, what, ("  (%d tasi boshqa turdagi ekan - o'zi to'g'rilandi)" % fixed)
+                                        if fixed else ""))
         self._schedule_import()
 
     def _schedule_import(self):
@@ -2169,7 +2217,7 @@ class App:
 
     def _set_busy(self, busy):
         st = "disabled" if busy else "normal"
-        for b in (self.btn_pick, self.btn_report_big, self.btn_recalc):
+        for b in (self.btn_pick_in, self.btn_pick_out, self.btn_report_big, self.btn_recalc):
             try:
                 b.configure(state=st)
             except tk.TclError:
