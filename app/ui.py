@@ -98,10 +98,12 @@ def setup_style(root, scale):
     base = max(11, int(round(12 * scale)))
     # "*Font" option ttk yozuvlarining uslubdagi shriftini bosib ketardi (sarlavhalar
     # kattalashmasdi) - shuning uchun nomli standart shriftlar o'zgartiriladi.
-    from tkinter import font as tkfont
+    # tkinter.font moduli ISHLATILMAYDI: u .exe ichiga o'ralmagan, launcher uni
+    # bermaydi (1.4.0-1.6.1 da ilova .exe da "cannot import name 'font'" bilan ochilmasdi).
+    # Tcl buyrug'i bilan to'g'ridan-to'g'ri - hech qanday qo'shimcha modul kerak emas.
     for nm in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont", "TkCaptionFont"):
         try:
-            tkfont.nametofont(nm).configure(family="Segoe UI", size=base)
+            root.tk.call("font", "configure", nm, "-family", "Segoe UI", "-size", base)
         except tk.TclError:
             pass
 
