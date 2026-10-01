@@ -427,11 +427,16 @@ class MatchEngine:
             "FROM product p ORDER BY p.canon_name").fetchall()
         if not q:
             return rows[:limit]
+        # So'z o'zagi bo'yicha ham: "машины" -> "машина", "машинки" (rus tilidagi
+        # qo'shimchalar buxgalterni chalg'itmasin)
+        stems = [t[:max(4, len(t) - 2)] for t in q.split() if len(t) >= 3]
         out = []
         for r in rows:
             n = C.norm_name(r["canon_name"])
             if q in n:
                 out.append((0, r))
+            elif stems and all(st in n for st in stems):
+                out.append((0.3, r))
             else:
                 sc = difflib.SequenceMatcher(None, q, n).ratio()
                 if sc > 0.45:

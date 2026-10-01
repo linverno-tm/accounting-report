@@ -1,11 +1,11 @@
 {
-  "version": "1.3.2",
-  "generated": "2026-10-01T09:49:29",
+  "version": "1.4.0",
+  "generated": "2026-10-01T10:09:28",
   "modules": [
     {
       "name": "bh_config",
       "path": "app/config.py",
-      "sha256": "ebd3475e510afa02a3825ede363857b08b5b74ba8527acb28b6c25306d29014a",
+      "sha256": "ed58b8e4956b8ef0e5d1664d6443c3cec3dfd51da21899ac9826f9a885b40e16",
       "bytes": 18743
     },
     {
@@ -23,8 +23,8 @@
     {
       "name": "bh_matching",
       "path": "app/matching.py",
-      "sha256": "e35ca6cae4964f1e589523529db6b7f0f112a80334aaccfb1e4638467d9e2eb1",
-      "bytes": 19158
+      "sha256": "c46ff1c1cf6bb3f453f849a376be5a5dad7ccbdb45492864b8ba292b85dcd874",
+      "bytes": 19479
     },
     {
       "name": "bh_fifo",
@@ -41,8 +41,8 @@
     {
       "name": "bh_ui",
       "path": "app/ui.py",
-      "sha256": "8ca600e77787b75d603ae2ce534c56d3b7ee8e61f1b08ffa6c8f75e62013584e",
-      "bytes": 81940
+      "sha256": "da687154afef7515a1d9e0cb711c2fa66111cbdbb94140cec98c2552c7bbb837",
+      "bytes": 93811
     }
   ]
 }

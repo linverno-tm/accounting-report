@@ -62,7 +62,7 @@ for w,h,lbl in [(1240,780,'katta (1240x780)'),(1024,700,'noutbuk (1024x700)'),
 
 print()
 print('=== HAR BIR VARAQ ===')
-for i in range(6):
+for i in range(len(app.nb.tabs())):
     app.nb.select(i)
     root.update_idletasks(); root.update()
     name = app.nb.tab(i,'text').strip()
