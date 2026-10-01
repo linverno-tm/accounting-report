@@ -27,6 +27,7 @@ LAYOUT QOIDALARI (talab bo'yicha):
 """
 
 import os
+import re
 import sys
 import queue
 import threading
@@ -564,6 +565,132 @@ def install_shortcuts(title=None):
         except Exception:
             continue
     return made
+
+
+# ===========================================================================
+# Bitta nusxa ("o'rnatish")
+#
+# .exe ni buxgalter qayerdan ochsa o'sha joydan ishlardi: yangisini yuklab olsa
+# kompyuterda ikkinchi nusxa paydo bo'lardi ("BuxgalterHisobot (1).exe",
+# Telegram papkasida yana bittasi...). Egasining talabi: "bitta ilova ikkita
+# bo'lib qolmasin".
+#
+# Endi doimiy joy bor: %LOCALAPPDATA%\BuxgalterHisobot\BuxgalterHisobot.exe.
+#   1. Boshqa joydan ochilsa - o'zini shu yerga ko'chiradi (eski versiya
+#      ustidan yoziladi), yorliqlarni shu yerga qaratadi, o'sha nusxani
+#      ishga tushirib o'zi yopiladi va yopilgandan keyin o'chiriladi.
+#   2. Doimiy joydan ochilganda - odatiy papkalardagi boshqa nusxalarni
+#      o'chiradi.
+# O'chiriladigan fayl: nomi BuxgalterHisobot*.exe, hajmi 5 MB dan katta
+# (PyInstaller to'plami) va doimiy nusxaning o'zi emas. Ishlab turgan nusxa
+# qulflangan bo'ladi - o'chmaydi, keyingi ochilishda qayta urinadi.
+# ===========================================================================
+INSTALL_EXE_NAME = "BuxgalterHisobot.exe"
+_COPY_NAME = re.compile(r"^buxgalterhisobot(\s*\(\d+\)|[\s_-]*v?[\d.]+)?\.exe$", re.IGNORECASE)
+_MIN_EXE_BYTES = 5 * 1024 * 1024
+
+
+def install_path():
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "BuxgalterHisobot", INSTALL_EXE_NAME)
+
+
+def _same_file(a, b):
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def _stray_dirs():
+    home = os.path.expanduser("~")
+    dirs = [desktop_dir(), os.path.join(home, "Desktop"), os.path.join(home, "OneDrive", "Desktop"),
+            os.path.join(home, "Downloads"), os.path.join(home, "Documents"),
+            os.path.join(home, "Downloads", "Telegram Desktop"),
+            os.path.join(home, "Documents", "Telegram Desktop")]
+    out = []
+    for d in dirs:
+        if d and os.path.isdir(d) and not any(_same_file(d, x) for x in out):
+            out.append(d)
+    return out
+
+
+def _is_app_copy(path):
+    try:
+        return (_COPY_NAME.match(os.path.basename(path)) is not None
+                and os.path.isfile(path) and os.path.getsize(path) > _MIN_EXE_BYTES)
+    except OSError:
+        return False
+
+
+def remove_stray_copies(keep):
+    """Odatiy papkalardagi boshqa nusxalarni o'chiradi. O'chirilganlar ro'yxati."""
+    removed = []
+    for d in _stray_dirs():
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for n in names:
+            p = os.path.join(d, n)
+            if _same_file(p, keep) or not _is_app_copy(p):
+                continue
+            try:
+                os.remove(p)
+                removed.append(p)
+            except OSError:
+                pass          # ochiq turgan nusxa - keyingi safar
+    return removed
+
+
+def _delete_after_exit(path):
+    """Shu jarayon yopilgandan keyin faylni o'chiradi (o'zini o'chira olmaydi)."""
+    import subprocess
+    try:
+        subprocess.Popen(
+            'cmd /c ping 127.0.0.1 -n 4 >nul & del /f /q "%s"' % path,
+            shell=True, creationflags=0x08000000 | 0x00000008,   # oynasiz, ajralgan
+            close_fds=True)
+    except Exception:
+        pass
+
+
+def ensure_single_install():
+    """
+    True qaytarsa - doimiy nusxa ishga tushirildi, bu jarayon darhol yopilsin.
+    Har qanday xatoda jim o'tadi: dastur baribir ochilishi kerak.
+    """
+    exe = app_exe_path()
+    if not exe or not sys.platform.startswith("win"):
+        return False
+    target = install_path()
+    try:
+        if _same_file(exe, target):
+            remove_stray_copies(target)
+            return False
+        # Boshqa joydan ochildi: o'zini doimiy joyga ko'chiradi. Eski nusxa
+        # ochiq bo'lsa (qulflangan) - ko'chira olmaydi, shu joydan ishlayveradi.
+        import shutil
+        import subprocess
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        tmp = target + ".new"
+        shutil.copy2(exe, tmp)
+        try:
+            os.replace(tmp, target)
+        except OSError:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return False
+        try:
+            install_shortcuts()
+        except Exception:
+            pass
+        subprocess.Popen([target], cwd=os.path.dirname(target), close_fds=True,
+                         creationflags=0x00000008)       # DETACHED_PROCESS
+        if _is_app_copy(exe):
+            _delete_after_exit(exe)
+        return True
+    except Exception:
+        return False
 
 
 def expand_inputs(paths):
@@ -1897,6 +2024,9 @@ class App:
 # Kirish nuqtasi
 # ===========================================================================
 def main(launcher_info=None):
+    # Boshqa joydan ochilgan bo'lsa - doimiy joyga o'rnatib, o'sha nusxa ochiladi
+    if ensure_single_install():
+        return 0
     root = tk.Tk()
     try:
         App(root, launcher_info)
