@@ -61,6 +61,7 @@ pyinstaller --onefile --windowed --clean ^
   --hidden-import tkinter.filedialog ^
   --hidden-import tkinter.messagebox ^
   --hidden-import tkinter.scrolledtext ^
+  --hidden-import tkinter.font ^
   launcher.py
 if errorlevel 1 goto :error
 
