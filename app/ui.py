@@ -1022,12 +1022,14 @@ class App:
         self.tab_stock = self._tab_stock()
         self.tab_issues = self._tab_issues()
         self.tab_settings = self._tab_settings()
+        self.tab_sources = self._tab_sources()
 
         self.nb.add(self.tab_home, text="Asosiy")
         self.nb.add(self.tab_match, text="Tovarni tanlash")
         self.nb.add(self.tab_stock, text="Ombor qoldig'i")
         self.nb.add(self.tab_issues, text="Kamchiliklar")
         self.nb.add(self.tab_settings, text="Sozlamalar")
+        self.nb.add(self.tab_sources, text="Qo'shilgan fayllar")
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab)
         # eski testlar uchun (pastki panel endi yo'q)
         self.actionbar = None
@@ -1099,6 +1101,14 @@ class App:
         self.lbl_import = ttk.Label(b1, text="", style="Result.TLabel", justify="left",
                                     anchor="w")
         self.lbl_import.pack(fill="x", pady=(10, 0))
+        urow = ttk.Frame(b1, style="CardIn.TFrame")
+        urow.pack(fill="x", pady=(6, 0))
+        # Noto'g'ri fayl qo'shilsa - shu yerning o'zida bekor qilinadi
+        self.btn_undo = ttk.Button(urow, text="Bekor qilish", style="Ghost.TButton",
+                                   command=self.undo_last_import)
+        ttk.Button(urow, text="Qo'shilgan fayllar ro'yxati", style="Ghost.TButton",
+                   command=lambda: self.nb.select(self.tab_sources)).pack(side="right")
+        self._last_import_ids = []
         # Fayllar jadvali faqat navbat bo'lsa yoki o'qilmagan fayl bo'lsa ko'rinadi
         self.files_box = ttk.Frame(b1, style="CardIn.TFrame")
         self.lbl_queue = ttk.Label(self.files_box, text="", style="CardMuted.TLabel")
@@ -1230,6 +1240,73 @@ class App:
         pane.add(left, weight=3)
         pane.add(right, weight=4)
         return page
+
+    # ------------------------------------------------------------------
+    # Qo'shilgan fayllar (noto'g'risini o'chirish)
+    # ------------------------------------------------------------------
+    def _tab_sources(self):
+        page = ttk.Frame(self.nb, padding=10)
+        row = ttk.Frame(page)
+        row.pack(fill="x", pady=(0, 6))
+        ttk.Label(row, text="Qo'shilgan fayllar", style="H1.TLabel").pack(side="left")
+        ttk.Button(row, text="Tanlanganlarni o'chirish", style="Big.TButton",
+                   command=self.delete_selected_sources).pack(side="right")
+        ttk.Label(page, style="Muted.TLabel", justify="left",
+                  text="Noto'g'ri qo'shilgan faylni bosing (bir nechtasini - Ctrl bilan) va "
+                       "\"Tanlanganlarni o'chirish\" ni bosing. Uning fakturalari yoki cheklari "
+                       "hisobotdan olib tashlanadi. Keyin to'g'ri faylni qaytadan qo'shish mumkin."
+                  ).pack(anchor="w", pady=(0, 8))
+        self.tbl_sources = Table(page, [
+            ("file", "Fayl", 380, True, "w"),
+            ("kind", "Turi", 130, False, "w"),
+            ("docs", "Hujjatlar", 100, False, "e"),
+            ("dates", "Sanalari", 200, False, "w"),
+            ("at", "Qachon qo'shilgan", 170, False, "w"),
+        ], scale=self.scale, height=16)
+        self.tbl_sources.tree.configure(selectmode="extended")
+        self.tbl_sources.pack(fill="both", expand=True)
+        self._sources = []
+        return page
+
+    def refresh_sources(self):
+        self._sources = DB.source_files(self.cx)
+
+        def dd(v):
+            return "%s.%s.%s" % (v[8:10], v[5:7], v[:4]) if v else ""
+        rows = []
+        for r in self._sources:
+            dates = dd(r["dmin"]) if r["dmin"] == r["dmax"] else "%s - %s" % (dd(r["dmin"]), dd(r["dmax"]))
+            rows.append((r["filename"], self.KIND_WORD.get(r["kind"], r["kind"]), r["docs"], dates,
+                         (r["imported_at"] or "").replace("T", " ")[:16]))
+        self.tbl_sources.fill(rows)
+
+    def _delete_sources(self, ids, what):
+        if not ids:
+            return
+        if not messagebox.askyesno(
+                "O'chirishni tasdiqlang",
+                "%s olib tashlanadi - ularning fakturalari va cheklari hisobotdan chiqadi.\n\n"
+                "Davom etamizmi?" % what):
+            return
+
+        def job(cx, progress):
+            n = DB.delete_source_files(cx, ids)
+            progress(0, 0, "ombor qayta hisoblanmoqda")
+            F.rebuild_stock(cx, progress)
+            return {"deleted": n}
+        self._run("O'chirish", job)
+
+    def delete_selected_sources(self):
+        sel = [int(i) for i in self.tbl_sources.tree.selection()]
+        ids = [self._sources[i]["id"] for i in sel if i < len(self._sources)]
+        if not ids:
+            messagebox.showinfo("Tanlanmagan", "Avval ro'yxatdan o'chiriladigan faylni bosing.")
+            return
+        self._delete_sources(ids, "%d ta fayl" % len(ids))
+
+    def undo_last_import(self):
+        self._delete_sources(list(self._last_import_ids),
+                             "Hozirgina qo'shilgan %d ta fayl" % len(self._last_import_ids))
 
     # ------------------------------------------------------------------
     # Ombor qoldig'i
@@ -1426,7 +1503,7 @@ class App:
         self.refresh_counts()
         self.refresh_queue()
         self._refresh_db_label()
-        self._stale = {0, 1, 2, 3}
+        self._stale = {0, 1, 2, 3, 5}
         self._refresh_tab(self._current_tab())
 
     def _current_tab(self):
@@ -1449,6 +1526,8 @@ class App:
             self.refresh_stock()
         elif tab == 3:
             self.refresh_issues()
+        elif tab == 5:
+            self.refresh_sources()
 
     def refresh_counts(self):
         st = DB.stats(self.cx)
@@ -1921,6 +2000,7 @@ class App:
             docs = lines = skipped = dup_files = 0
             warns = []
             results = []       # (fayl, turi, natija) - jadval uchun
+            new_ids = []       # shu safar qo'shilgan fayllar - "Bekor qilish" uchun
             word = self.KIND_WORD
             for i, (path, kind) in enumerate(files):
                 name = os.path.basename(path)
@@ -1947,6 +2027,7 @@ class App:
                         results.append((name, word.get(kind, kind),
                                         "Oldin qo'shilgan - qayta hisoblanmaydi"))
                     continue
+                new_ids.append(sid)
                 r = P.parse_any(path, kind)
                 warns.extend(r["warnings"])
                 a, s, n = F.import_parsed(cx, eng, r, sid)
@@ -1976,7 +2057,8 @@ class App:
             st = F.rebuild_stock(cx, progress)
             return {"files": len(files), "dup_files": dup_files, "docs": docs,
                     "skipped": skipped, "lines": lines, "auto": auto,
-                    "left": left, "stock": st, "warns": warns, "results": results}
+                    "left": left, "stock": st, "warns": warns, "results": results,
+                    "new_ids": new_ids}
 
         self._run("Import", job)
 
@@ -2147,6 +2229,8 @@ class App:
             self.refresh_unmatched()
         elif tab == 0:
             self.refresh_home()
+        elif tab == 5:
+            self.refresh_sources()
 
     def _recalc_if_dirty(self):
         """
@@ -2260,7 +2344,21 @@ class App:
                                       foreground=PALETTE["err"] if bad else PALETTE["ok"],
                                       wraplength=int(900 * self.scale))
             self.set_status("Fayllar qabul qilindi")
+            self._last_import_ids = res.get("new_ids", [])
+            if self._last_import_ids:
+                self.btn_undo.configure(
+                    text="Bekor qilish (shu %d ta faylni olib tashlash)" % len(self._last_import_ids))
+                self.btn_undo.pack(side="left")
+            else:
+                self.btn_undo.pack_forget()
             self.nb.select(self.tab_home)
+        elif label == "O'chirish":
+            self._last_import_ids = []
+            self._last_results = []
+            self.btn_undo.pack_forget()
+            self.lbl_import.configure(text="%d ta fayl olib tashlandi. To'g'ri faylni qaytadan qo'shishingiz mumkin."
+                                           % res["deleted"], foreground=PALETTE["ink"])
+            self.set_status("Fayllar olib tashlandi")
         elif label == "Ajratish":
             self.set_status("Tashkilotlar ajratildi: %d ta faktura%s"
                             % (res["fixed"], ("; %d ta fayl topilmadi" % res["missing"])

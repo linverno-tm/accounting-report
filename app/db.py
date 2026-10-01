@@ -564,6 +564,35 @@ def stats(cx):
     }
 
 
+def source_files(cx):
+    """Qo'shilgan fayllar ro'yxati (yangisi tepada) - "Qo'shilgan fayllar" sahifasi uchun."""
+    return [dict(r) for r in cx.execute("""
+        SELECT sf.id, sf.filename, sf.kind, sf.imported_at,
+               (SELECT COUNT(*) FROM document d WHERE d.source_file_id = sf.id) docs,
+               (SELECT MIN(d.doc_date) FROM document d WHERE d.source_file_id = sf.id) dmin,
+               (SELECT MAX(d.doc_date) FROM document d WHERE d.source_file_id = sf.id) dmax
+        FROM source_file sf ORDER BY sf.id DESC""")]
+
+
+def delete_source_files(cx, ids):
+    """
+    Noto'g'ri qo'shilgan fayllarni olib tashlaydi: fayl yozuvi, uning hujjatlari,
+    satrlari va ombor yozuvlari (ON DELETE CASCADE). Keyin ombor qayta hisoblanishi kerak.
+    Fayl o'chgach, uni qaytadan qo'shish mumkin.
+    """
+    ids = [int(i) for i in ids]
+    if not ids:
+        return 0
+    cx.execute("BEGIN")
+    try:
+        cur = cx.execute("DELETE FROM source_file WHERE id IN (%s)" % ",".join("?" * len(ids)), ids)
+        cx.execute("COMMIT")
+    except Exception:
+        cx.execute("ROLLBACK")
+        raise
+    return cur.rowcount
+
+
 def reset_all(cx):
     """Hamma ma'lumotni o'chirish (sozlamalar va o'rganilgan aliaslar qoladi)."""
     for t in ("allocation", "stock_lot", "doc_line", "document",
