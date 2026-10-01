@@ -640,16 +640,24 @@ def remove_stray_copies(keep):
     return removed
 
 
-def _delete_after_exit(path):
-    """Shu jarayon yopilgandan keyin faylni o'chiradi (o'zini o'chira olmaydi)."""
-    import subprocess
-    try:
-        subprocess.Popen(
-            'cmd /c ping 127.0.0.1 -n 4 >nul & del /f /q "%s"' % path,
-            shell=True, creationflags=0x08000000 | 0x00000008,   # oynasiz, ajralgan
-            close_fds=True)
-    except Exception:
-        pass
+def _remove_later(path, tries=40):
+    """
+    Eski (yuklab olingan) nusxani o'chiradi: u hali yopilayotgan bo'ladi, shuning uchun
+    bir necha soniya qayta urinadi. Fon oqimida - oyna ham, tashqi buyruq ham yo'q
+    (ilgari "cmd /c ping ... del" ishlatilardi - Windows 11 da qora oyna chiqardi).
+    """
+    import time
+
+    def run():
+        for _ in range(tries):
+            try:
+                if not os.path.exists(path):
+                    return
+                os.remove(path)
+                return
+            except OSError:
+                time.sleep(0.5)
+    threading.Thread(target=run, daemon=True).start()
 
 
 def ensure_single_install():
@@ -663,6 +671,12 @@ def ensure_single_install():
     target = install_path()
     try:
         if _same_file(exe, target):
+            # Yangi o'rnatilgan nusxa: o'zini ochgan eski faylni o'chiradi
+            if "--eski" in sys.argv:
+                i = sys.argv.index("--eski")
+                old = sys.argv[i + 1] if i + 1 < len(sys.argv) else ""
+                if old and not _same_file(old, target) and _is_app_copy(old):
+                    _remove_later(old)
             remove_stray_copies(target)
             return False
         # Boshqa joydan ochildi: o'zini doimiy joyga ko'chiradi. Eski nusxa
@@ -684,10 +698,11 @@ def ensure_single_install():
             install_shortcuts()
         except Exception:
             pass
-        subprocess.Popen([target], cwd=os.path.dirname(target), close_fds=True,
-                         creationflags=0x00000008)       # DETACHED_PROCESS
+        args = [target]
         if _is_app_copy(exe):
-            _delete_after_exit(exe)
+            args += ["--eski", exe]      # yangi nusxa shu faylni o'chiradi
+        subprocess.Popen(args, cwd=os.path.dirname(target), close_fds=True,
+                         creationflags=0x00000008)       # DETACHED_PROCESS (GUI, oyna yo'q)
         return True
     except Exception:
         return False
