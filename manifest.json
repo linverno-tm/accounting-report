@@ -1,11 +1,11 @@
 {
-  "version": "1.6.0",
-  "generated": "2026-10-01T15:43:51",
+  "version": "1.6.1",
+  "generated": "2026-10-01T15:56:21",
   "modules": [
     {
       "name": "bh_config",
       "path": "app/config.py",
-      "sha256": "b24d34c78c0f220820d942cc997e4cbcce4b9dc1c9286eb0f7d8d643bacf1a3c",
+      "sha256": "fdb647fe1d052fe7ab1cb9d74f97f4961c0b24533cce8c882cf49f1aa50f5a07",
       "bytes": 18743
     },
     {
@@ -41,8 +41,8 @@
     {
       "name": "bh_ui",
       "path": "app/ui.py",
-      "sha256": "29533ea1de6735255c8141c522a1b0e06171ca7c80098ceca4a68a018f419572",
-      "bytes": 105491
+      "sha256": "49db3e2a9b36fd4040a043ffee4eed770a69519b459ac70421d04324d266efcf",
+      "bytes": 106213
     }
   ]
 }

@@ -570,13 +570,16 @@ def desktop_dir():
     return os.path.expanduser("~")
 
 
-def install_shortcuts(title=None):
+def install_shortcuts(title=None, exe=None):
     """
     Ish stoliga va Boshlash menyusiga yorliq qo'yadi.
 
+    exe - yorliq ko'rsatadigan fayl (berilmasa - ishlab turgan .exe). O'rnatishda
+    DOIMIY nusxa beriladi: ilgari yuklab olingan fayl berilardi, u o'chirilgach
+    yorliq ishlamay qolardi (1.6.1 da tuzatildi).
     Yaratilgan yo'llar ro'yxatini qaytaradi. .exe emas bo'lsa - bo'sh ro'yxat.
     """
-    exe = app_exe_path()
+    exe = exe or app_exe_path()
     if not exe or not sys.platform.startswith("win"):
         return []
 
@@ -692,6 +695,21 @@ def _remove_later(path, tries=40):
     threading.Thread(target=run, daemon=True).start()
 
 
+def _repair_shortcuts_once(target):
+    """
+    1.3.1-1.6.0 yorliqni yuklab olingan faylga qaratib qo'yardi (u keyin o'chiriladi) -
+    doimiy nusxa birinchi ochilganda yorliqlar bir marta to'g'rilanadi.
+    """
+    flag = os.path.join(os.path.dirname(target), "shortcuts_v2.ok")
+    if os.path.exists(flag):
+        return
+    try:
+        install_shortcuts(exe=target)
+        open(flag, "w").close()
+    except Exception:
+        pass
+
+
 def ensure_single_install():
     """
     True qaytarsa - doimiy nusxa ishga tushirildi, bu jarayon darhol yopilsin.
@@ -710,6 +728,7 @@ def ensure_single_install():
                 if old and not _same_file(old, target) and _is_app_copy(old):
                     _remove_later(old)
             remove_stray_copies(target)
+            _repair_shortcuts_once(target)
             return False
         # Boshqa joydan ochildi: o'zini doimiy joyga ko'chiradi. Eski nusxa
         # ochiq bo'lsa (qulflangan) - ko'chira olmaydi, shu joydan ishlayveradi.
@@ -727,7 +746,7 @@ def ensure_single_install():
                 pass
             return False
         try:
-            install_shortcuts()
+            install_shortcuts(exe=target)
         except Exception:
             pass
         args = [target]
