@@ -470,6 +470,28 @@ def _tx_rows(kirim, sales, year, markup, alloc):
     return rows
 
 
+_FULL_COL = re.compile(r"('(?:[^']|'')+')!\$([A-Z]{1,3}):\$([A-Z]{1,3})")
+
+
+def _bound_columns(wb):
+    """
+    'varaq'!$G:$G -> 'varaq'!$G$1:$G$<oxirgi satr>. Natija aynan bir xil, lekin
+    eski kompyuter, eski Excel, WPS va LibreOffice butun ustunni (1 mln satr)
+    aylanib, fayl ochilishi sekinlashardi (egasi: "Excel fayl ochilishi sekin").
+    """
+    last = {_q(ws.title): max(ws.max_row, 2) for ws in wb.worksheets}
+
+    def fix(m):
+        n = last.get(m.group(1))
+        return m.group(0) if n is None else "%s!$%s$1:$%s$%d" % (m.group(1), m.group(2), m.group(3), n)
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for c in row:
+                v = c.value
+                if isinstance(v, str) and v.startswith("=") and ":$" in v:
+                    c.value = _FULL_COL.sub(fix, v)
+
+
 def _style_cells(ws, row, cols, numfmt=None, font=None, fill=None, border=None, align=None):
     for c in cols:
         cell = ws.cell(row=row, column=c)
@@ -889,6 +911,7 @@ def build_formula_workbook(cx, out_path, years, owner_name, owner_tin=None, prog
     # ------------------------------------------------ Xatolar (oddiy so'z bilan)
     stats["issues"] = write_issues_sheet(wb, cx, years, S, owner_tin)
 
+    _bound_columns(wb)
     d = os.path.dirname(os.path.abspath(out_path))
     if d and not os.path.isdir(d):
         os.makedirs(d, exist_ok=True)
