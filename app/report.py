@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 bh_report - "КАМЕРАЛ ТЕКШИРУВЛАР" Excel hisoboti. HISOB-KITOB EXCEL FORMULALARIDA
-(1.6.0, egasi talabi): ilova faqat ma'lumotni yozadi, kirim, chiqim (FIFO), qoldiq,
+(1.6.0, egasi talabi): ilova faqat ma'lumotni yozadi, kirim, chiqim, qoldiq,
 sotish narxi va jamilarni Excelning o'zi hisoblaydi. Batafsil - build_formula_workbook.
 
 Varaqlar:
@@ -238,14 +238,16 @@ def default_filename(years, owner_name=None):
 #   касса YYYY   - har chek satri + "Товар коди" (ilova bog'lagan tovar).
 #   YYYY ТХ      - asl 22 ustun, HAMMA son formula:
 #                    kirim  = INDEX(Кирим), narx = INDEX(Кирим)
-#                    chiqim = FIFO: shu tovarning yil davomida sotilgani (SUMIFS
-#                             касса) minus yuqoridagi (eskiroq) partiyalarda bori
+#                    chiqim = SUMIFS(тақсимот YYYY) shu partiya bo'yicha
 #                    qoldiq = boshiga + kirim - chiqim
+#   тақсимот YYYY - har sotuv qaysi partiyadan chiqqani (1.7.0, buxgalter qoidasi):
+#                  sotuv sanasigacha kelgan ENG OXIRGI fakturadan (_allocate)
 #                    boshiga qoldiq = o'tgan yil ТХ dagi shu partiyaning qoldig'i
 #                    sotish narxi = tannarx x (1+ustama) x (1+QQS)
 #   Xatolar      - oddiy so'z bilan.
-# Formulada qilib bo'lmaydigan yagona ish - chekdagi sotuvni qaysi tovarga bog'lash
-# (bh_matching); uning natijasi "Товар коди" ustunida ochiq turibdi.
+# Formulada qilib bo'lmaydigan ish - chekdagi sotuvni qaysi tovarga bog'lash
+# (bh_matching) va qaysi partiyadan yechish (_allocate); natijasi "Товар коди"
+# va "тақсимот" varag'ida ochiq turibdi.
 # Excel faylni ochganda hamma formulani o'zi hisoblaydi (fullCalcOnLoad).
 # ===========================================================================
 MONTHS_UZ = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август",
@@ -271,6 +273,10 @@ def _q(sheet):
 
 def _kassa_name(y):
     return "касса %d" % y
+
+
+def _alloc_name(y):
+    return "тақсимот %d" % y
 
 
 def _tx_name(y):
@@ -342,47 +348,105 @@ def _formula_data(cx, owner_tin, years):
     return {"kirim": kirim, "sales": sales, "fakt": fakt}
 
 
-def _tx_rows(kirim, sales, year, markup):
+A_BEFORE = "Sotuvgacha kelgan faktura"
+A_AFTER = "Sotuvdan keyin kelgan faktura"
+A_SHORT = "Omborda yetmadi"
+A_NOLOT = "Fakturasi topilmadi"
+A_RETURN = "Qaytarildi"
+
+
+def _allocate(kirim, sales):
+    """
+    Har sotuv qaysi partiya (faktura satri)dan chiqqani - buxgalter qoidasi (1.7.0).
+    Ilgari yillik FIFO edi: 28.09 da sotilgan 45 ta mototsikl avval avgustdagi
+    43 talik partiyadan yechilib, 24.09 dagi 45 talik fakturaga 2 ta qolardi.
+    Endi:
+      a) sotuv sanasigacha kelgan partiyalardan - ENG OXIRGISIDAN boshlab,
+         u tugasa oldingisidan;
+      b) yetmasa - shu yil ichida sotuvdan keyin kelgan partiyadan (yaqinidan);
+      c) baribir yetmasa - partiyasiz ("omborda yetmadi").
+    Qaytarish (manfiy miqdor) oxirgi yechilgan partiyaga qaytadi.
+    Natija: {sotuv satri id: [(partiya yoki None, miqdor, izoh)]}.
+    """
+    lots = {}
+    for k in sorted(kirim, key=lambda k: (k["dt"], k["id"])):
+        if k["group"] is not None and (k["qty"] or 0) > 0:
+            lots.setdefault(k["group"], []).append(k)
+    left = {k["id"]: _r4(k["qty"]) for gl in lots.values() for k in gl}
+    taken = {}      # guruh -> [[partiya, miqdor]] yechilgan tartibda (qaytarish uchun)
+    out = {}
+    for s in sales:                     # _formula_data sana tartibida beradi
+        g, q = s["group"], _r4(s["qty"])
+        if g is None or not q:
+            continue
+        gl = lots.get(g, [])
+        res = out.setdefault(s["id"], [])
+        if q < 0:
+            back, st = -q, taken.get(g, [])
+            while back > 0 and st:
+                lot, n = st[-1]
+                b = min(n, back)
+                left[lot["id"]] = _r4(left[lot["id"]] + b)
+                res.append((lot, -b, A_RETURN))
+                back = _r4(back - b)
+                if b == n:
+                    st.pop()
+                else:
+                    st[-1][1] = _r4(n - b)
+            if back > 0:
+                res.append((None, -back, A_RETURN))
+            continue
+        need, y = q, s["dt"][:4]
+        for cand, why in (([l for l in reversed(gl) if l["dt"] <= s["dt"]], A_BEFORE),
+                          ([l for l in gl if l["dt"] > s["dt"] and l["dt"][:4] == y], A_AFTER)):
+            for l in cand:
+                if need <= 0:
+                    break
+                av = left[l["id"]]
+                if av <= 0:
+                    continue
+                t = min(av, need)
+                left[l["id"]] = _r4(av - t)
+                need = _r4(need - t)
+                res.append((l, t, why))
+                taken.setdefault(g, []).append([l, t])
+        if need > 0:
+            res.append((None, need, A_SHORT if gl else A_NOLOT))
+    return out
+
+
+def _tx_rows(kirim, sales, year, markup, alloc):
     """
     Bir yil uchun ТХ satrlari - Excel formulasi bilan AYNAN bir xil hisob (satrlar
     ro'yxatini tuzish va jamilarni ilova oynasida ko'rsatish uchun).
+    alloc - _allocate natijasi.
     """
     lots = sorted([k for k in kirim if k["group"] is not None and (k["qty"] or 0) > 0
                    and int(k["dt"][:4]) <= year], key=lambda k: (k["dt"], k["id"]))
-    sold = {}
+    out_y, short = {}, {}           # (partiya id, yil) / (guruh, yil) -> miqdor
     for s in sales:
-        if s["group"] is None:
-            continue
         y = int(s["dt"][:4])
-        sold.setdefault(s["group"], {})
-        sold[s["group"]][y] = _r4(sold[s["group"]].get(y, 0) + (s["qty"] or 0))
-    left, rows = {}, []
-    first = int(lots[0]["dt"][:4]) if lots else year
-    for y in range(min(first, year), year + 1):
-        by_g = {}
-        for l in lots:
-            if int(l["dt"][:4]) <= y:
-                by_g.setdefault(l["group"], []).append(l)
-        for g, gl in by_g.items():
-            need = sold.get(g, {}).get(y, 0)
-            for l in gl:
-                ly = int(l["dt"][:4])
-                op = left.get(l["id"], 0) if ly < y else 0
-                inq = l["qty"] if ly == y else 0
-                av = _r4(op + inq)
-                out = min(av, max(0, need))
-                need = _r4(need - out)
-                left[l["id"]] = _r4(av - out)
-                if y == year and (op or inq or out):
-                    rows.append({"kind": "lot", "lot": l, "key": _gkey(g), "date": l["dt"],
-                                 "name": l["raw_name"], "cost": l["price"] or 0,
-                                 "open": _r4(op), "in": _r4(inq), "out": _r4(out)})
-            if y == year and need > 0:
-                lt = gl[-1]
-                rows.append({"kind": "short", "lot": lt, "key": _gkey(g), "date": "%d-12-31" % year,
-                             "name": lt["raw_name"], "cost": lt["price"] or 0,
-                             "open": 0, "in": 0, "out": _r4(need)})
-    with_lots = {l["group"] for l in lots}
+        for lot, q, _why in alloc.get(s["id"], ()):
+            k, d = ((lot["id"], y), out_y) if lot is not None else ((s["group"], y), short)
+            d[k] = _r4(d.get(k, 0) + q)
+    rows, last_lot = [], {}
+    for l in lots:
+        ly = int(l["dt"][:4])
+        op = _r4(l["qty"] - sum(out_y.get((l["id"], y), 0) for y in range(ly, year))) if ly < year else 0
+        inq = l["qty"] if ly == year else 0
+        out = out_y.get((l["id"], year), 0)
+        last_lot[l["group"]] = l
+        if op or inq or out:
+            rows.append({"kind": "lot", "lot": l, "key": _gkey(l["group"]), "date": l["dt"],
+                         "name": l["raw_name"], "cost": l["price"] or 0,
+                         "open": _r4(op), "in": _r4(inq), "out": _r4(out)})
+    for (g, y), need in sorted(short.items()):
+        if y == year and g in last_lot and need:
+            lt = last_lot[g]
+            rows.append({"kind": "short", "lot": lt, "key": _gkey(g), "date": "%d-12-31" % year,
+                         "name": lt["raw_name"], "cost": lt["price"] or 0,
+                         "open": 0, "in": 0, "out": _r4(need)})
+    with_lots = set(last_lot)
     other = {}
     for s in sales:
         if int(s["dt"][:4]) != year:
@@ -432,6 +496,7 @@ def build_formula_workbook(cx, out_path, years, owner_name, owner_tin=None, prog
     year = years[-1]
     data = _formula_data(cx, owner_tin, years)
     kirim, sales = data["kirim"], data["sales"]
+    alloc = _allocate(kirim, sales)
     vat = float(C.VAT_RATE)
     markups = {y: float(DB.get_markup(cx, y)) for y in years}
 
@@ -467,6 +532,8 @@ def build_formula_workbook(cx, out_path, years, owner_name, owner_tin=None, prog
         wb.create_sheet(_kassa_name(y))
     for y in years:
         wb.create_sheet(_tx_name(y))
+    for y in years:
+        wb.create_sheet(_alloc_name(y))
 
     # ------------------------------------------------ Ma'lumot: sozlama katakchalari
     for col, w in zip("ABCDEFG", (3, 44, 22, 22, 22, 22, 22)):
@@ -562,8 +629,8 @@ def build_formula_workbook(cx, out_path, years, owner_name, owner_tin=None, prog
           "Миқдори", "Нархи\n(сатр суммаси)", "Чегирма суммаси", "Дисконт суммаси", "ҚҚС суммаси",
           "Жами нақд пул", "Жами банк карта", "Жами ҚҚС", "Маҳсулот коди", "Ўлчов бирлиги коди",
           "Штрих код", "Воситачи СТИРи (ЖИШШРи)", "Маркировка\nкоди", "Чек тури",
-          "Tovar kodi\n(ТХ dagi)", "Qanday bog'langan", "Chek\n(1-satr)"]
-    KW = [30, 16, 16, 12, 10, 46, 11, 18, 11, 11, 16, 15, 16, 15, 19, 12, 14, 14, 20, 11, 12, 22, 9]
+          "Tovar kodi\n(ТХ dagi)", "Qanday bog'langan", "Chek\n(1-satr)", "Партия №\n(тақсимот)"]
+    KW = [30, 16, 16, 12, 10, 46, 11, 18, 11, 11, 16, 15, 16, 15, 19, 12, 14, 14, 20, 11, 12, 22, 9, 16]
     HOW = {"barcode": "Shtrix-kod bo'yicha", "marking": "Markirovka bo'yicha", "alias": "Avval tanlangan",
            "name": "Nomi bir xil", "prefix": "Nomi (qisqartirilgan)", "fuzzy": "Nomi o'xshash",
            "fuzzy+mxik": "Nomi o'xshash, MXIK bir xil", "mxik": "MXIK bo'yicha", "manual": "Qo'lda tanlangan"}
@@ -586,7 +653,8 @@ def build_formula_workbook(cx, out_path, years, owner_name, owner_tin=None, prog
                     _r4(s["doc_gross"]) if first else None, _r4(s["doc_vat"]) if first else None,
                     s["mxik"], s["unit_raw"], s["barcode"], "", s["marking_code"], s["check_type"],
                     s["key"], HOW.get(s["match_method"], "Bog'lanmagan") if s["group"] is not None
-                    else "Bog'lanmagan", 1 if first else None]
+                    else "Bog'lanmagan", 1 if first else None,
+                    ", ".join(str(a[0]["id"]) for a in alloc.get(s["id"], ()) if a[0] is not None) or None]
             for i, v in enumerate(vals):
                 ws.cell(row=rr, column=i + 1, value=_txt(v))
             ws.cell(row=rr, column=4).number_format = NUM_DATE
@@ -594,7 +662,7 @@ def build_formula_workbook(cx, out_path, years, owner_name, owner_tin=None, prog
             for c in (8, 11, 12, 13, 14):
                 ws.cell(row=rr, column=c).number_format = NUM_MONEY
             if s["is_return"]:
-                _style_cells(ws, rr, range(1, 24), fill=fill_warn)
+                _style_cells(ws, rr, range(1, 25), fill=fill_warn)
             elif s["group"] is None:
                 _style_cells(ws, rr, (21, 22), fill=fill_err)
             rr += 1
@@ -603,10 +671,49 @@ def build_formula_workbook(cx, out_path, years, owner_name, owner_tin=None, prog
         for c, fmt in ((7, NUM_QTY), (8, NUM_MONEY), (11, NUM_MONEY), (23, "0")):
             L = get_column_letter(c)
             ws.cell(row=rr, column=c, value="=SUBTOTAL(9,%s2:%s%d)" % (L, L, max(2, rr - 1))).number_format = fmt
-        _style_cells(ws, rr, range(1, 24), font=f_bold, fill=fill_tot)
+        _style_cells(ws, rr, range(1, 25), font=f_bold, fill=fill_tot)
         ws.freeze_panes = "A2"
         if rr > 2:
-            ws.auto_filter.ref = "A1:W%d" % (rr - 1)
+            ws.auto_filter.ref = "A1:X%d" % (rr - 1)
+
+    # ------------------------------------------------ тақсимот YYYY: sotuv qaysi partiyadan
+    AH = ["Чек санаси", "Чек рақами", "Маҳсулот номи", "Миқдори\n(шу партиядан)", "Партия №",
+          "Партия санаси", "Фактура рақами", "Калит\n(ТХ даги)", "Изоҳ"]
+    AW = [12, 10, 46, 14, 11, 12, 16, 12, 30]
+    for y in years:
+        ws = wb[_alloc_name(y)]
+        for i, w in enumerate(AW):
+            ws.column_dimensions[get_column_letter(i + 1)].width = w
+        for i, h in enumerate(AH):
+            hdr(ws, 1, i + 1, h)
+        ws.row_dimensions[1].height = 32
+        rr = 2
+        for s in sales:
+            if int(s["dt"][:4]) != y or not s["qty"]:
+                continue
+            parts = alloc.get(s["id"]) or [(None, _r4(s["qty"]), A_NOLOT)]
+            for lot, q, why in parts:
+                vals = [C.parse_date(s["dt"]), s["doc_no"], s["raw_name"], q,
+                        lot["id"] if lot is not None else None,
+                        C.parse_date(lot["dt"]) if lot is not None else None,
+                        lot["doc_no"] if lot is not None else None,
+                        lot["id"] if lot is not None else s["key"], why]
+                for i, v in enumerate(vals):
+                    ws.cell(row=rr, column=i + 1, value=_txt(v))
+                ws.cell(row=rr, column=1).number_format = NUM_DATE
+                ws.cell(row=rr, column=6).number_format = NUM_DATE
+                ws.cell(row=rr, column=4).number_format = NUM_QTY
+                if lot is None:
+                    _style_cells(ws, rr, range(1, 10), fill=fill_err)
+                elif why == A_AFTER:
+                    _style_cells(ws, rr, range(1, 10), fill=fill_warn)
+                rr += 1
+        ws.cell(row=rr, column=3, value="JAMI")
+        ws.cell(row=rr, column=4, value="=SUBTOTAL(9,D2:D%d)" % max(2, rr - 1)).number_format = NUM_QTY
+        _style_cells(ws, rr, range(1, 10), font=f_bold, fill=fill_tot)
+        ws.freeze_panes = "A2"
+        if rr > 2:
+            ws.auto_filter.ref = "A1:I%d" % (rr - 1)
 
     # ------------------------------------------------ YYYY ТХ
     TH = ["№", "санаси", "Товар номи", "Маркировкаланган", "МХИК Коди", "Ўлчов бирлиги",
@@ -621,9 +728,10 @@ def build_formula_workbook(cx, out_path, years, owner_name, owner_tin=None, prog
             progress(yi, len(years), "%d ТХ" % y)
         ws = wb[_tx_name(y)]
         ks = _q(_kassa_name(y))
+        aq = _q(_alloc_name(y))
         prev = _q(_tx_name(y - 1)) if (y - 1) in years else None
         mk = _mk_name(y)
-        rows = _tx_rows(kirim, sales, y, markups[y])
+        rows = _tx_rows(kirim, sales, y, markups[y], alloc)
         for i, w in enumerate(TW):
             ws.column_dimensions[get_column_letter(i + 1)].width = w
         ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=22)
@@ -649,7 +757,6 @@ def build_formula_workbook(cx, out_path, years, owner_name, owner_tin=None, prog
             is_lot = x["kind"] == "lot"
             this_year = is_lot and x["date"][:4] == str(y)
             sold = "SUMIFS(%s!$G:$G,%s!$U:$U,$W%d)" % (ks, ks, rr)
-            above = lambda col: "SUMIFS(%s$4:%s%d,$W$4:$W%d,$W%d)" % (col, col, rr - 1, rr - 1, rr)
             name = x["name"] or ""
             if x["kind"] == "unmatched":
                 name += "  (fakturasi topilmadi)"
@@ -679,11 +786,9 @@ def build_formula_workbook(cx, out_path, years, owner_name, owner_tin=None, prog
             ws.cell(row=rr, column=11, value=("=INDEX(%s!$H:$H,MATCH($X%d,%s!$N:$N,0))" % (kq, rr, kq)) if this_year else 0)
             ws.cell(row=rr, column=12, value="=I%d" % rr)
             ws.cell(row=rr, column=13, value="=K%d*L%d" % (rr, rr))
-            # CHIQIM - FIFO: yil davomida sotilgani minus yuqoridagi (eskiroq) partiyalarda bori
-            if is_lot:
-                ws.cell(row=rr, column=14, value="=MIN(H%d+K%d,MAX(0,%s-%s-%s))" % (rr, rr, sold, above("H"), above("K")))
-            else:
-                ws.cell(row=rr, column=14, value="=MAX(0,%s-%s-%s)" % (sold, above("H"), above("K")))
+            # CHIQIM - тақсимот varag'idan: partiya satri - Партия № bo'yicha, qolgani - tovar kodi
+            ws.cell(row=rr, column=14, value="=SUMIFS(%s!$D:$D,%s!$H:$H,$%s%d)"
+                    % (aq, aq, "X" if is_lot else "W", rr))
             ws.cell(row=rr, column=15, value="=I%d" % rr)
             ws.cell(row=rr, column=16, value="=N%d*O%d" % (rr, rr))
             ws.cell(row=rr, column=17, value="=H%d+K%d-N%d" % (rr, rr, rr))
@@ -772,7 +877,8 @@ def build_formula_workbook(cx, out_path, years, owner_name, owner_tin=None, prog
     for t in ["Qanday o'qish kerak:",
               "  - Bu fayldagi hamma hisob - Excel formulasi. Katakni bosing - formulasi ko'rinadi.",
               "  - Sariq katakdagi QQS yoki ustamani o'zgartirsangiz, ТХ va jamilar o'zi qayta hisoblanadi.",
-              "  - Chiqim tannarxi FIFO: avval eng eski partiyadan yechiladi (ТХ, \"Чиқим\" ustuni formulasi).",
+              "  - Sotuv sotuv sanasigacha kelgan ENG OXIRGI fakturadan yechiladi, u tugasa oldingisidan. "
+              "Qaysi sotuv qaysi fakturadan - \"тақсимот\" varag'ida; ТХ \"Чиқим\" o'shandan yig'iladi.",
               "  - Davr boshiga qoldiq o'tgan yil ТХ varag'idagi shu partiyaning qoldig'idan olinadi.",
               "  - Qizil satr: tovar sotilgan, lekin fakturasi topilmagan yoki omborda yetmagan - tannarx taxminiy.",
               "  - \"Tovar kodi\" - dastur chekdagi sotuvni qaysi fakturadagi tovarga bog'lagani."]:

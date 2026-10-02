@@ -282,7 +282,9 @@ def _rebuild(cx, progress=None):
     Endi:
       1-bosqich - barcha kirim partiyalari yaratiladi;
       2-bosqich - sotuvlar sana tartibida yechiladi:
-            a) sotuv sanasida ochiq bo'lgan partiyalardan (haqiqiy FIFO);
+            a) sotuv sanasida ochiq bo'lgan partiyalardan - eng oxirgi kelganidan
+               boshlab (1.7.0 gacha eng eskisidan edi; buxgalter: 28.09 dagi
+               sotuv 24.09 fakturadan yozilsin, avgustdagi partiyadan emas);
             b) topilmasa - SHU YIL ichidagi keyingi kirimdan (ogohlantirish
                bilan: sana tartibi teskari, lekin tovar davr ichida bor);
             c) butun davrda ham bo'lmasa - "omborda yo'q" (kirim hujjati
@@ -313,7 +315,7 @@ def _rebuild(cx, progress=None):
     total = len(rows)
     # Bir tovarning bir necha kartochkasi (bh_matching.product_groups) bitta
     # zaxira sifatida yuritiladi: sotuv qaysi kartochkaga bog'langan bo'lsa
-    # ham, guruhdagi eng eski partiyadan yechiladi.
+    # ham, guruhdagi partiyalardan (a-qoida bo'yicha) yechiladi.
     grp = M.load_product_groups(cx)
     # guruh ildizi -> partiyalar [ [lot_id, qty_left, unit_cost, lot_date], ... ]
     open_lots = {}
@@ -374,6 +376,10 @@ def _rebuild(cx, progress=None):
         only_future_of_year=YYYY -> sotuvdan KEYIN kelgan, lekin shu yildagi
         """
         nonlocal n_alloc
+        if only_future_of_year is None:
+            # buxgalter qoidasi (1.7.0): sotuvgacha kelganlarning ENG OXIRGISIDAN
+            # (sanasi yo'q partiya - eng eski deb, oxirida)
+            lots = sorted(lots, key=lambda l: l[3] or "", reverse=True)
         for lot in lots:
             if need <= 0:
                 break
